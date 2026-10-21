@@ -317,10 +317,10 @@ class QuietTests(TempAppData):
 class PhoneMenuTests(unittest.TestCase):
     def test_most_used_first(self):
         page = app.ANDROID_WEB_CLIENT
-        self.assertIn('<div class="remote" id="menuFavs" style="display:none"></div>', page)
-        self.assertIn("function openMenu() { menuMoreOpen = false; arrangeMenu();", page)
+        self.assertIn('<div class="menu-grid" id="menuFavs"></div>', page)
+        self.assertIn("function openMenu() { arrangeMenu();", page)
         self.assertIn("(use[tileKey(t)] || 0) >= 2)", page)  # tapped at least twice
-        self.assertIn(".slice(0, 6)", page)
+        self.assertIn(".slice(0, 4)", page)
 
 
 class HardeningTests(TempAppData):

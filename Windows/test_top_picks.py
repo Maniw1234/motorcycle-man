@@ -351,7 +351,7 @@ class PhoneAlertTests(PhoneServer):
         self.assertEqual(self.post("/phone_notice", b"x" * 20000)[0], 413)
         self.assertEqual(self.post("/phone_notice", notice, token=False)[0], 403)
         self.assertEqual(self.bridge.notice_sig.emit.call_count, 1)
-        for needed in ('id="noticesBtn"', "window.onNotices", "function toggleNotices"):
+        for needed in ('id="rowNotices"', "window.onNotices", "function toggleNotices"):
             self.assertIn(needed, app.PHONE_PAGE)
 
     def test_windows_says_when(self):

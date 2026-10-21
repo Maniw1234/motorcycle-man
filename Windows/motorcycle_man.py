@@ -2343,9 +2343,23 @@ PHONE_PAGE = r"""<!DOCTYPE html>
   .trick-row button { font-size: 13px; }
   #timeModal .sheet { max-height: 88vh; overflow-y: auto; }
   #menuModal .sheet { max-height: 90vh; overflow-y: auto; touch-action: pan-y; -webkit-overflow-scrolling: touch; }
-  #menuFavs { margin-bottom: 12px; }
-  .menu-more { display: block; width: 100%; margin: 0 0 12px; padding: 11px; border-radius: 14px; border: 1px solid var(--line);
-               background: transparent; color: var(--muted); font-size: 14px; font-weight: 700; cursor: pointer; }
+  .menu-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .menu-head h3 { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #menuTiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); column-gap: 18px; }
+  .menu-part { color: #8B95C9; font-size: 11px; font-weight: 700; letter-spacing: 1px; margin: 14px 2px 8px; }
+  .menu-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(76px, 1fr)); gap: 8px; }
+  .menu-grid .rb { padding: 10px 4px 9px; gap: 5px; font-size: 12px; border-radius: 16px; }
+  .menu-grid .rb svg { width: 22px; height: 22px; }
+  @media (orientation: landscape) { #menuModal .sheet { width: min(920px, 100%); } }
+  #prefsModal .sheet { max-height: 90vh; overflow-y: auto; touch-action: pan-y; -webkit-overflow-scrolling: touch; }
+  .pref span small, .pref-link span small { display: block; color: var(--muted); font-size: 12.5px; font-weight: 500;
+                                            margin-top: 2px; line-height: 1.35; }
+  .switch-row.pref { gap: 14px; }
+  .pref-link { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 14px; padding: 9px 2px;
+               background: none; border: none; color: var(--ink); font: inherit; font-size: 15px; font-weight: 650;
+               text-align: left; cursor: pointer; }
+  .pref-link b { color: var(--muted); font-size: 24px; font-weight: 400; }
+  #prefsAbout { color: var(--muted); font-size: 12.5px; text-align: center; margin: 18px 0 4px; }
   #timeTotal { font-size: 20px; font-weight: 800; color: var(--sun); }
   .time-row { display: grid; grid-template-columns: 28px 1fr auto; gap: 4px 10px; align-items: center; padding: 7px 0; }
   .time-row img, .time-row .noicon { width: 28px; height: 28px; border-radius: 7px; grid-row: span 2; }
@@ -2547,40 +2561,71 @@ PHONE_PAGE = r"""<!DOCTYPE html>
 </div>
 <div class="backdrop" id="menuModal" onclick="if (event.target === this) closeMenu()">
   <div class="sheet">
-    <h3 id="menuTitle">Motorcycle Man</h3>
-    <div class="remote" id="menuFavs" style="display:none"></div>
-    <button class="menu-more" id="menuMore" style="display:none" onclick="toggleMenuMore()"></button>
-    <div class="remote" id="menuTiles">
-      <button class="rb" onclick="fromMenu(openScreen)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg><span>PC screen</span></button>
-      <button class="rb" onclick="fromMenu(openPad)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="4"/><path d="M3 15h18M12 15v6"/></svg><span>Touchpad</span></button>
-      <button class="rb" onclick="fromMenu(openSlides)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4h20M4 4v10a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1V4M12 15v3M8 21l4-3 4 3"/><path d="M8 11l3-3 2 2 3-3"/></svg><span>Slides</span></button>
-      <button class="rb" onclick="fromMenu(openRemote)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg><span>Remote</span></button>
-      <button class="rb" onclick="fromMenu(openLists)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h11M9 12h11M9 18h11"/><path d="M4 6l1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2"/></svg><span>Lists</span></button>
-      <button class="rb" onclick="fromMenu(openGame)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="11" rx="5"/><path d="M7 10v5M4.5 12.5h5"/><circle cx="16" cy="11.5" r="1"/><circle cx="18.5" cy="14" r="1"/></svg><span>Game pad</span></button>
-      <button class="rb" onclick="fromMenu(openFocus)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 1.5M9 2h6"/></svg><span>Focus</span></button>
-      <button class="rb" onclick="fromMenu(openScreenTime)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"/><path d="M6 20v-6M10 20V9M14 20v-9M18 20V5"/></svg><span>Screen time</span></button>
-      <button class="rb" onclick="fromMenu(openFiles)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>Files</span></button>
-      <button class="rb" onclick="fromMenu(openSettings)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg><span>Settings</span></button>
-      <button class="rb" onclick="fromMenu(openMusic)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l11-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/></svg><span>Music</span></button>
-      <button class="rb" onclick="fromMenu(openWindows)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="13" height="10" rx="1.5"/><path d="M8 18h11a2 2 0 0 0 2-2V9"/></svg><span>Windows</span></button>
-      <button class="rb" onclick="fromMenu(openBrief)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="3.5"/><path d="M9 2v1.5M2 9h1.5M4 4l1 1M14 4l-1 1"/><path d="M10 20h8a3.5 3.5 0 0 0 0-7 5 5 0 0 0-9.6 1.5A3 3 0 0 0 10 20z"/></svg><span>Brief</span></button>
-      <button class="rb" onclick="fromMenu(openFind)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg><span>Find</span></button>
-      <button class="rb" onclick="fromMenu(openHealth)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2-5 4 10 2-5h6"/></svg><span>Health</span></button>
-      <button class="rb" onclick="fromMenu(openPower)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v8"/><path d="M6.3 6.8a8 8 0 1 0 11.4 0"/></svg><span>Power</span></button>
-      <button class="rb" onclick="fromMenu(openSend)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4v13M3 13l4 4 4-4M17 20V7M13 11l4-4 4 4"/></svg><span>Send</span></button>
-      <button class="rb" id="historyBtn" onclick="fromMenu(openHistory)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>History</span></button>
-      <button class="rb" onclick="fromMenu(toggleFullscreen)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/></svg><span>Full screen</span></button>
-      <button class="rb" id="pcsBtn" style="display:none" onclick="fromMenu(choosePc)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="13" height="9" rx="1.5"/><path d="M6 15h5M8.5 12v3"/><rect x="11" y="9" width="11" height="8" rx="1.5"/><path d="M14.5 20h4M16.5 17v3"/></svg><span>PCs</span></button>
-      <button class="rb" onclick="fromMenu(openRoutines)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l4 4-4 4"/><path d="M3 11V9a3 3 0 0 1 3-3h15"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v2a3 3 0 0 1-3 3H3"/></svg><span>Routines</span></button>
-      <button class="rb" onclick="fromMenu(openSiriGuide)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg><span>Siri</span></button>
-      <button class="rb" onclick="fromMenu(openPaint)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="14" height="6" rx="1.5"/><path d="M17 6h3v6h-8v3"/><rect x="10.5" y="15" width="3" height="6" rx="1"/></svg><span>Paint</span></button>
-      <button class="rb" onclick="fromMenu(openGuide)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5z"/><path d="M4 20.5A2.5 2.5 0 0 0 6.5 23H20v-5"/><path d="M12 7.5v.01M12 10.5v4"/></svg><span>Guide</span></button>
-      <button class="rb" onclick="fromMenu(openReminders)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2M5 3L2 6M19 3l3 3"/></svg><span>Reminders</span></button>
-      <button class="rb" id="textsBtn" style="display:none" onclick="fromMenu(() => window.MotorcycleManAndroid.smsSettings())"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 21l1.9-5.4A8 8 0 1 1 21 12z"/><path d="M8.5 11.5h.01M12 11.5h.01M15.5 11.5h.01"/></svg><span>Texts</span></button>
-      <button class="rb" id="noticesBtn" aria-pressed="false" style="display:none" onclick="toggleNotices()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9a6 6 0 0 1 12 0c0 6 2.5 7.5 2.5 7.5h-17S6 15 6 9z"/><path d="M10.3 20a2 2 0 0 0 3.4 0"/></svg><span>Alerts off</span></button>
-      <button class="rb" id="watchBtn" aria-pressed="false" style="display:none" onclick="toggleWatch()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="3"/><path d="M9 6l1-3h4l1 3M9 18l1 3h4l1-3M12 9.5V12l1.5 1"/></svg><span>Watch off</span></button>
-      <button class="rb" id="voiceBtn" aria-pressed="true" onclick="toggleTalkBack()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/></svg><span>Voice on</span></button>
+    <div class="menu-head"><h3 id="menuTitle">Motorcycle Man</h3>
+      <button class="icon-btn" onclick="fromMenu(openPrefs)" aria-label="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button></div>
+    <section class="menu-sec" id="menuFavsSec" style="display:none"><div class="menu-part">MOST USED</div><div class="menu-grid" id="menuFavs"></div></section>
+    <div id="menuTiles">
+      <section class="menu-sec"><div class="menu-part">USE THE PC</div><div class="menu-grid">
+        <button class="rb" onclick="fromMenu(openScreen)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg><span>PC screen</span></button>
+        <button class="rb" onclick="fromMenu(openPad)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="4"/><path d="M3 15h18M12 15v6"/></svg><span>Touchpad</span></button>
+        <button class="rb" onclick="fromMenu(openRemote)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg><span>Remote</span></button>
+        <button class="rb" onclick="fromMenu(openWindows)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="13" height="10" rx="1.5"/><path d="M8 18h11a2 2 0 0 0 2-2V9"/></svg><span>Windows</span></button>
+        <button class="rb" onclick="fromMenu(openSlides)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4h20M4 4v10a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1V4M12 15v3M8 21l4-3 4 3"/><path d="M8 11l3-3 2 2 3-3"/></svg><span>Slides</span></button>
+        <button class="rb" onclick="fromMenu(openGame)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="11" rx="5"/><path d="M7 10v5M4.5 12.5h5"/><circle cx="16" cy="11.5" r="1"/><circle cx="18.5" cy="14" r="1"/></svg><span>Game pad</span></button>
+      </div></section>
+      <section class="menu-sec"><div class="menu-part">FILES AND MUSIC</div><div class="menu-grid">
+        <button class="rb" onclick="fromMenu(openSend)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4v13M3 13l4 4 4-4M17 20V7M13 11l4-4 4 4"/></svg><span>Send</span></button>
+        <button class="rb" onclick="fromMenu(openFiles)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>Files</span></button>
+        <button class="rb" onclick="fromMenu(openFind)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg><span>Find</span></button>
+        <button class="rb" onclick="fromMenu(openMusic)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l11-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/></svg><span>Music</span></button>
+      </div></section>
+      <section class="menu-sec"><div class="menu-part">YOUR DAY</div><div class="menu-grid">
+        <button class="rb" onclick="fromMenu(openReminders)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2M5 3L2 6M19 3l3 3"/></svg><span>Reminders</span></button>
+        <button class="rb" onclick="fromMenu(openRoutines)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l4 4-4 4"/><path d="M3 11V9a3 3 0 0 1 3-3h15"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v2a3 3 0 0 1-3 3H3"/></svg><span>Routines</span></button>
+        <button class="rb" onclick="fromMenu(openLists)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h11M9 12h11M9 18h11"/><path d="M4 6l1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2"/></svg><span>Lists</span></button>
+        <button class="rb" onclick="fromMenu(openBrief)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="3.5"/><path d="M9 2v1.5M2 9h1.5M4 4l1 1M14 4l-1 1"/><path d="M10 20h8a3.5 3.5 0 0 0 0-7 5 5 0 0 0-9.6 1.5A3 3 0 0 0 10 20z"/></svg><span>Brief</span></button>
+        <button class="rb" onclick="fromMenu(openFocus)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 1.5M9 2h6"/></svg><span>Focus</span></button>
+      </div></section>
+      <section class="menu-sec"><div class="menu-part">THE PC</div><div class="menu-grid">
+        <button class="rb" onclick="fromMenu(openHealth)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2-5 4 10 2-5h6"/></svg><span>Health</span></button>
+        <button class="rb" onclick="fromMenu(openPower)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v8"/><path d="M6.3 6.8a8 8 0 1 0 11.4 0"/></svg><span>Power</span></button>
+        <button class="rb" onclick="fromMenu(openSettings)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="7" rx="3.5"/><circle cx="15.5" cy="7.5" r="1.8"/><rect x="2" y="13" width="20" height="7" rx="3.5"/><circle cx="8.5" cy="16.5" r="1.8"/></svg><span>Quick settings</span></button>
+        <button class="rb" onclick="fromMenu(openScreenTime)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"/><path d="M6 20v-6M10 20V9M14 20v-9M18 20V5"/></svg><span>Screen time</span></button>
+        <button class="rb" id="historyBtn" onclick="fromMenu(openHistory)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>History</span></button>
+      </div></section>
+      <section class="menu-sec"><div class="menu-part">HELP AND SETTINGS</div><div class="menu-grid">
+        <button class="rb" onclick="fromMenu(openGuide)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5z"/><path d="M4 20.5A2.5 2.5 0 0 0 6.5 23H20v-5"/><path d="M12 7.5v.01M12 10.5v4"/></svg><span>Guide</span></button>
+        <button class="rb" onclick="fromMenu(openPrefs)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg><span>Settings</span></button>
+      </div></section>
     </div>
+  </div>
+</div>
+<div class="backdrop" id="prefsModal" onclick="if (event.target === this) closePrefs()">
+  <div class="sheet">
+    <div class="remote-head"><h3>Settings</h3><span id="prefsSay"></span></div>
+    <div class="send-part">THIS PHONE</div>
+    <label class="switch-row pref"><span>Spoken replies<small>When you talk, answers come out loud on this phone</small></span><input type="checkbox" id="prefTalkBack" onchange="toggleTalkBack()"></label>
+    <label class="switch-row pref" id="rowNotices" style="display:none"><span>Phone alerts on the PC<small>Your phone's notifications show on the PC, and you can reply there</small></span><input type="checkbox" id="prefNotices" onchange="toggleNotices()"></label>
+    <label class="switch-row pref" id="rowWatch" style="display:none"><span>Watch<small>A notification your watch shows, to talk to the PC from it</small></span><input type="checkbox" id="prefWatch" onchange="toggleWatch()"></label>
+    <label class="switch-row pref"><span>Full screen<small>Hide the phone's status and navigation bars</small></span><input type="checkbox" id="prefFull" onchange="toggleFullscreen()"></label>
+    <button class="pref-link" id="rowTexts" style="display:none" onclick="fromPrefs(() => window.MotorcycleManAndroid.smsSettings())"><span>Text commands<small>Run commands by texting this phone with your PIN</small></span><b>&rsaquo;</b></button>
+    <div class="send-part">ON THE PC</div>
+    <label class="switch-row pref"><span>Voice on the PC<small>Answers and reminders out loud on the PC</small></span><input type="checkbox" data-pref="voice_replies"></label>
+    <label class="switch-row pref"><span>Engine sounds<small>The bike's engine when it rides off and does tricks</small></span><input type="checkbox" data-pref="engine_sounds"></label>
+    <label class="switch-row pref"><span>Quiet<small>The buddy only comes out for your commands; other news is a Windows notification</small></span><input type="checkbox" data-pref="quiet"></label>
+    <label class="switch-row pref"><span>&ldquo;Hey Motorcycle Man&rdquo;<small>Say it to the PC, then what to do (or press Ctrl+Alt+M)</small></span><input type="checkbox" data-pref="wake_word"></label>
+    <label class="switch-row pref"><span>Morning brief<small>The weather and your day, the first time you use the PC each morning</small></span><input type="checkbox" data-pref="brief_morning"></label>
+    <label class="switch-row pref"><span>Clipboard sync<small>Copy on the PC or the phone, paste on the other</small></span><input type="checkbox" data-pref="clip_sync"></label>
+    <label class="switch-row pref"><span>Start with Windows<small>Ready by the clock when you sign in to the PC</small></span><input type="checkbox" data-pref="start_with_windows"></label>
+    <label class="switch-row pref"><span>Look for updates<small>Offer new versions of Motorcycle Man; nothing installs until you say so</small></span><input type="checkbox" data-pref="check_updates"></label>
+    <div class="send-part">LOOK</div>
+    <button class="pref-link" onclick="fromPrefs(openPaint)"><span>Paint job<small id="prefPaint"></small></span><b>&rsaquo;</b></button>
+    <div class="send-part">CONNECTION</div>
+    <button class="pref-link" id="rowPcs" style="display:none" onclick="fromPrefs(choosePc)"><span>Switch PC<small>Pick another PC this phone has connected to</small></span><b>&rsaquo;</b></button>
+    <button class="pref-link" onclick="fromPrefs(openSiriGuide)"><span>iPhone, Siri and iMessage<small>Shortcuts that send commands to this PC</small></span><b>&rsaquo;</b></button>
+    <div class="send-part">HELP</div>
+    <button class="pref-link" onclick="fromPrefs(openGuide)"><span>Guide and welcome tour<small>Every feature, how to use it and how it works</small></span><b>&rsaquo;</b></button>
+    <div id="prefsAbout"></div>
   </div>
 </div>
 <div class="backdrop" id="remoteModal" onclick="if (event.target === this) closeRemote()">
@@ -3521,37 +3566,64 @@ if (navigator.getBattery) {
     battery.addEventListener('chargingchange', note);
   }).catch(() => {});
 }
-// The menu behind "more": a tile for each thing the page can do besides talking and typing.
-function openMenu() { menuMoreOpen = false; arrangeMenu(); document.getElementById('menuModal').style.display = 'block'; wake(); }
-// The tiles tapped most (at least twice, the top 6) come first and the rest wait under "All features": with
-// 28 tiles the menu was a lot to look through. What's tapped is counted on this phone only.
-let menuMoreOpen = false;
+// The menu behind "more": every feature, in sections (using the PC, files and music, your day, the PC, help).
+// The tiles tapped most (at least twice, the top 4) are also at the top, under Most used; what's tapped is
+// counted on this phone only. Switches and setup are in Settings (openPrefs), not among the tiles.
+function openMenu() { arrangeMenu(); document.getElementById('menuModal').style.display = 'block'; wake(); }
 function tileUse() { try { return JSON.parse(localStorage.getItem('mmTileUse') || '{}') || {}; } catch (e) { return {}; } }
 function tileKey(tile) { return tile.getAttribute('onclick') || ''; }
-function tileShown(tile) { return getComputedStyle(tile).display !== 'none'; }
-[...document.getElementById('menuTiles').children].forEach((tile, i) => { tile.dataset.order = i; });
-['menuTiles', 'menuFavs'].forEach(id => document.getElementById(id).addEventListener('click', event => {
+document.getElementById('menuModal').addEventListener('click', event => {
   const tile = event.target.closest('.rb');
   if (!tile) return;
   const use = tileUse();
   use[tileKey(tile)] = (use[tileKey(tile)] || 0) + 1;
   try { localStorage.setItem('mmTileUse', JSON.stringify(use)); } catch (e) {}
-}));
+});
 function arrangeMenu() {
-  const favs = document.getElementById('menuFavs'), all = document.getElementById('menuTiles');
-  const more = document.getElementById('menuMore'), use = tileUse();
-  const tiles = [...favs.children, ...all.children].sort((a, b) => a.dataset.order - b.dataset.order);
-  const top = tiles.filter(t => tileShown(t) && (use[tileKey(t)] || 0) >= 2)
-    .sort((a, b) => use[tileKey(b)] - use[tileKey(a)] || a.dataset.order - b.dataset.order).slice(0, 6);
-  top.forEach(t => favs.appendChild(t));
-  tiles.filter(t => !top.includes(t)).forEach(t => all.appendChild(t));
-  favs.style.display = more.style.display = top.length ? '' : 'none';
-  all.style.display = !top.length || menuMoreOpen ? '' : 'none';
-  more.textContent = menuMoreOpen ? 'Fewer ▴' : `All features (${[...all.children].filter(tileShown).length}) ▾`;
+  const use = tileUse(), favs = document.getElementById('menuFavs');
+  const tiles = [...document.querySelectorAll('#menuTiles .rb')];
+  const top = tiles.filter(t => (use[tileKey(t)] || 0) >= 2)
+    .sort((a, b) => use[tileKey(b)] - use[tileKey(a)] || tiles.indexOf(a) - tiles.indexOf(b)).slice(0, 4);
+  favs.textContent = '';
+  top.forEach(t => { const copy = t.cloneNode(true); copy.removeAttribute('id'); favs.appendChild(copy); });
+  document.getElementById('menuFavsSec').style.display = top.length ? '' : 'none';
 }
-function toggleMenuMore() { menuMoreOpen = !menuMoreOpen; arrangeMenu(); }
 function closeMenu() { document.getElementById('menuModal').style.display = 'none'; }
 function fromMenu(open) { closeMenu(); open(); }
+// Settings: this phone's switches, the PC's own settings (see /prefs on the PC), the paint job, other PCs, Siri
+// and the Guide, all in one place.
+function openPrefs() {
+  showTalkBack();
+  document.getElementById('prefFull').checked = !!document.fullscreenElement;
+  if (watchApp) showWatch(watchApp.watchOn());
+  if (noticesApp) showNotices(noticesApp.noticesOn());
+  const paint = PAINTS.find(job => job.name === PAGE_PAINT);
+  document.getElementById('prefPaint').textContent = paint ? paint.label : '';
+  document.getElementById('prefsModal').style.display = 'block';
+  wake();
+  askPrefs({});
+}
+function closePrefs() { document.getElementById('prefsModal').style.display = 'none'; }
+function fromPrefs(open) { closePrefs(); open(); }
+function askPrefs(params) {
+  const boxes = document.querySelectorAll('[data-pref]');
+  boxes.forEach(box => { box.disabled = true; });
+  return fetch(requestUrl('/prefs', params), {cache: 'no-store'}).then(res => res.ok ? res.json() : null).then(answer => {
+    document.getElementById('prefsSay').textContent = answer ? '' : "Can't reach your PC";
+    boxes.forEach(box => {
+      const on = answer ? answer.prefs[box.dataset.pref] : undefined;
+      if (on !== undefined) box.checked = !!on;
+      box.disabled = on === undefined;
+    });
+    if (answer) document.getElementById('prefsAbout').textContent = 'Motorcycle Man on ' + answer.pc
+      + (answer.build ? ' \u00b7 build ' + answer.build : ' \u00b7 built on that PC');
+  }).catch(() => { document.getElementById('prefsSay').textContent = "Can't reach your PC"; });
+}
+document.querySelectorAll('[data-pref]').forEach(box => box.addEventListener('change', () =>
+  askPrefs({set: box.dataset.pref, on: box.checked ? '1' : '0'})));
+document.addEventListener('fullscreenchange', () => {
+  document.getElementById('prefFull').checked = !!document.fullscreenElement;
+});
 // Every feature and how it works: the app's own window in the Android app, else the PC's guide page.
 function openGuide() {
   if (window.MotorcycleManAndroid && window.MotorcycleManAndroid.openGuide) { window.MotorcycleManAndroid.openGuide(); return; }
@@ -4728,11 +4800,7 @@ function researchCard(card, time) {
 
 // Spoken replies: what was said out loud is answered out loud, in the phone's own voice.
 let talkBack = remembered('talkBack') !== 'off', replyAloud = false;
-function showTalkBack() {
-  const button = document.getElementById('voiceBtn');
-  button.setAttribute('aria-pressed', talkBack ? 'true' : 'false');
-  button.querySelector('span').textContent = talkBack ? 'Voice on' : 'Voice off';
-}
+function showTalkBack() { document.getElementById('prefTalkBack').checked = talkBack; }
 function toggleTalkBack() {
   talkBack = !talkBack;
   remembered('talkBack', talkBack ? 'on' : 'off');
@@ -4864,25 +4932,21 @@ window.appAction = what => {
     window.dispatchEvent(new PointerEvent('pointerup'));
   }
 };
-// Several PCs: inside the Android app, the PCs button lists the PCs this phone knows, to switch between them.
+// Several PCs: inside the Android app, Settings > Switch PC lists the PCs this phone knows, to switch between them.
 if (window.MotorcycleManAndroid && typeof window.MotorcycleManAndroid.choosePc === 'function') {
-  document.getElementById('pcsBtn').style.display = '';
+  document.getElementById('rowPcs').style.display = '';
 }
 function choosePc() { window.MotorcycleManAndroid.choosePc(); }
-// A watch: inside the Android app, the Watch button puts up a notification that Wear OS and Galaxy watches
+// A watch: inside the Android app, Settings > Watch puts up a notification that Wear OS and Galaxy watches
 // show with its buttons, so a reply on the watch (said or typed) goes to the PC.
 const watchApp = window.MotorcycleManAndroid && typeof window.MotorcycleManAndroid.watch === 'function'
   ? window.MotorcycleManAndroid : null;
-function showWatch(on) {
-  const button = document.getElementById('watchBtn');
-  button.setAttribute('aria-pressed', on ? 'true' : 'false');
-  button.querySelector('span').textContent = on ? 'Watch on' : 'Watch off';
-}
+function showWatch(on) { document.getElementById('prefWatch').checked = !!on; }
 if (window.MotorcycleManAndroid && typeof window.MotorcycleManAndroid.smsSettings === 'function') {
-  document.getElementById('textsBtn').style.display = '';  // commands by text message to this phone
+  document.getElementById('rowTexts').style.display = '';  // commands by text message to this phone
 }
 if (watchApp) {
-  document.getElementById('watchBtn').style.display = '';
+  document.getElementById('rowWatch').style.display = '';
   showWatch(watchApp.watchOn());
 }
 function toggleWatch() { watchApp.watch(!watchApp.watchOn()); }
@@ -4890,13 +4954,9 @@ function toggleWatch() { watchApp.watch(!watchApp.watchOn()); }
 // asks for notification access the first time.
 const noticesApp = window.MotorcycleManAndroid && typeof window.MotorcycleManAndroid.notices === 'function'
   ? window.MotorcycleManAndroid : null;
-function showNotices(on) {
-  const button = document.getElementById('noticesBtn');
-  button.setAttribute('aria-pressed', on ? 'true' : 'false');
-  button.querySelector('span').textContent = on ? 'Alerts on PC' : 'Alerts off';
-}
+function showNotices(on) { document.getElementById('prefNotices').checked = !!on; }
 if (noticesApp) {
-  document.getElementById('noticesBtn').style.display = '';
+  document.getElementById('rowNotices').style.display = '';
   showNotices(noticesApp.noticesOn());
 }
 function toggleNotices() { noticesApp.notices(!noticesApp.noticesOn()); }
@@ -5078,6 +5138,17 @@ ANDROID_WEB_CLIENT = build_phone_page(paint_jobs.DEFAULT)
 _PHONE_PAGES = {paint_jobs.DEFAULT: ANDROID_WEB_CLIENT}
 
 
+# The PC's own settings that the phone's Settings screen can change (/prefs), with their defaults. Most are also
+# switches in the window, which follow (see ControlCenterWindow.pref_changed).
+PHONE_PREFS = {"voice_replies": True, "engine_sounds": True, "quiet": False, "wake_word": False, "brief_morning": True,
+               "clip_sync": True, "start_with_windows": True, "check_updates": True}
+
+
+def prefs_state() -> dict:
+    settings = load_settings()
+    return {name: bool(settings.get(name, default)) for name, default in PHONE_PREFS.items()}
+
+
 def phone_page() -> str:
     # The phone page with the helmet in the paint job chosen now.
     paint = paint_jobs.current()
@@ -5085,7 +5156,7 @@ def phone_page() -> str:
         _PHONE_PAGES[paint] = build_phone_page(paint)
     return _PHONE_PAGES[paint]
 PHONE_REQUESTS = {"/status", "/history", "/reminders", "/routines", "/paint", "/shortcut", "/ask", "/pad", "/slides", "/power", "/health", "/find", "/brief", "/hold_start", "/hold_stop", "/listen_stop", "/confirm", "/cmd", "/stop",
-                  "/app_version", "/app.apk", "/manifest.webmanifest", "/remote", "/clipboard", "/open_link", "/upload", "/files", "/file", "/screen.jpg", "/screen_input", "/screen_sound", "/screenshot.png", "/screen_text", "/windows", "/window_icon", "/guide", "/phone_inbox", "/clip_sync", "/media", "/media_art", "/mixer", "/settings", "/browse", "/guard", "/screen_time", "/focus", "/lists", "/gamepad"}
+                  "/app_version", "/app.apk", "/manifest.webmanifest", "/remote", "/clipboard", "/open_link", "/upload", "/files", "/file", "/screen.jpg", "/screen_input", "/screen_sound", "/screenshot.png", "/screen_text", "/windows", "/window_icon", "/guide", "/prefs", "/phone_inbox", "/clip_sync", "/media", "/media_art", "/mixer", "/settings", "/browse", "/guard", "/screen_time", "/focus", "/lists", "/gamepad"}
 
 
 def web_app_manifest(token: str) -> dict:
@@ -5544,6 +5615,7 @@ class Bridge(QObject):
     say_sig = Signal(str, int)
     notice_sig = Signal(str, int)  # news nobody asked for just now (see show_notice): the buddy, or Windows when Quiet
     update_quit_sig = Signal()  # an update is ready to take this copy's place: close (see install_update)
+    prefs_sig = Signal(str, bool)  # the phone's Settings changed one of PHONE_PREFS (see pref_changed)
     act_sig = Signal(str, object)  # the buddy's little show for what it does: "click", "type", "scroll", "done"...
     hide_sig = Signal()
     screen_hide_sig = Signal()
@@ -8560,6 +8632,7 @@ class ControlCenterWindow(QMainWindow):
         # The icon by the clock (set by main), whether Quit was chosen, and whether a task put this window away
         # (see step_aside).
         self.tray, self.quitting, self.stepped_aside = None, False, None
+        self.toggles = {}  # the window's switches by setting, with what each does (see _toggle, pref_changed)
         self.setStyleSheet(WINDOW_STYLE)
         central = QWidget()
         central.setObjectName("root")
@@ -8752,8 +8825,7 @@ class ControlCenterWindow(QMainWindow):
         box.addLayout(row)
         return label, button
 
-    @staticmethod
-    def _toggle(text: str, setting: str, tip: str, changed, default: bool = True):
+    def _toggle(self, text: str, setting: str, tip: str, changed, default: bool = True):
         # A switch kept in settings.json; changed(on) follows each flip (turning one on gives a taste of it).
         button = QPushButton(text)
         button.setObjectName("toggle")
@@ -8767,7 +8839,17 @@ class ControlCenterWindow(QMainWindow):
             changed(bool(on))
 
         button.toggled.connect(flip)
+        self.toggles[setting] = (button, changed)
         return button
+
+    def pref_changed(self, setting: str, on: bool):
+        # The phone's Settings changed a setting (already saved): its switch here follows, with what it does.
+        if setting in self.toggles:
+            button, changed = self.toggles[setting]
+            button.blockSignals(True)
+            button.setChecked(on)
+            button.blockSignals(False)
+            changed(on)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -14268,6 +14350,16 @@ def make_phone_handler(bridge, sw, sh):
                     self.send_json({"text": "", "say": "Windows can't read text here: it needs a language with text "
                                                        "recognition (Settings > Time & language)."})
                 return
+            if parsed.path == "/prefs":  # the phone's Settings: the PC's own switches (see PHONE_PREFS)
+                q = urllib.parse.parse_qs(parsed.query)
+                name = q.get("set", [""])[0]
+                if name in PHONE_PREFS:
+                    on = q.get("on", ["1"])[0] == "1"
+                    save_setting(name, on)
+                    bridge.prefs_sig.emit(name, on)  # the window's switch and what it does, on Qt's thread
+                    LOG.info("The phone turned %s %s", name, "on" if on else "off")
+                self.send_json({"prefs": prefs_state(), "pc": hello_info()["name"], "build": this_build()})
+                return
             if parsed.path == "/guide":  # every feature and how it works (guide.html, which the app shows too)
                 with open(guide.page_path(resource_path), encoding="utf-8") as f:
                     template = f.read()
@@ -14846,6 +14938,7 @@ def main():
     ctrl.tray = tray
     bridge.notice_sig.connect(lambda text, ms: show_notice(text, ms, overlay, tray))
     bridge.update_quit_sig.connect(lambda: (setattr(ctrl, "quitting", True), app.quit()))
+    bridge.prefs_sig.connect(ctrl.pref_changed)
     if "--updated" in sys.argv:
         bridge.notice_sig.emit(f"I'm updated! This is build {this_build()}.", 6000)
     tray_menu.aboutToShow.connect(lambda: fill_tray_menu(tray_menu, ctrl, bridge, sw, sh))

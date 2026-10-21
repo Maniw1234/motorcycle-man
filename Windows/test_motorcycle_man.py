@@ -2470,7 +2470,7 @@ class SoundTests(unittest.TestCase):
 
     def test_the_phone_answers_out_loud_what_was_said_out_loud(self):
         page = app.PHONE_PAGE
-        for needed in ('id="voiceBtn"', "function speakReply", "function hush", "replyAloud = true", "app.speak(words)"):
+        for needed in ('id="prefTalkBack"', "function speakReply", "function hush", "replyAloud = true", "app.speak(words)"):
             self.assertIn(needed, page)
 
 
@@ -2506,7 +2506,7 @@ class AndroidAppTests(unittest.TestCase):
         java = open(os.path.join(self.ANDROID, "src", "app", "motorcycleman", "remote", "WatchNotice.java"), encoding="utf-8").read()
         for needed in ("addRemoteInput(input)", "WearableExtender", '"/cmd"', '"/stop"', "goAsync()"):
             self.assertIn(needed, java)
-        for needed in ('id="watchBtn"', "window.onWatch = on =>", "watchApp.watch(!watchApp.watchOn())"):
+        for needed in ('id="rowWatch"', "window.onWatch = on =>", "watchApp.watch(!watchApp.watchOn())"):
             self.assertIn(needed, app.PHONE_PAGE)
 
     def test_texts_to_the_phone_reach_the_pc_only_with_the_pin(self):
@@ -2518,12 +2518,12 @@ class AndroidAppTests(unittest.TestCase):
         java = open(os.path.join(self.ANDROID, "src", "app", "motorcycleman", "remote", "SmsCommands.java"), encoding="utf-8").read()
         for needed in ("isOn(context)", "pin(context)", "locked(context, sender)", "WRONG_LIMIT"):
             self.assertIn(needed, java)
-        for needed in ('id="textsBtn"', "MotorcycleManAndroid.smsSettings()"):
+        for needed in ('id="rowTexts"', "MotorcycleManAndroid.smsSettings()"):
             self.assertIn(needed, app.PHONE_PAGE)
 
     def test_a_phone_with_several_pcs_sees_which_one_this_is(self):
         self.assertEqual(app.phone_status()["pc"], app.socket.gethostname())
-        for needed in ('id="pcsBtn"', "MotorcycleManAndroid.choosePc()", "showPcName(state.pc)"):
+        for needed in ('id="rowPcs"', "MotorcycleManAndroid.choosePc()", "showPcName(state.pc)"):
             self.assertIn(needed, app.PHONE_PAGE)
         java = open(os.path.join(self.ANDROID, "src", "app", "motorcycleman", "remote", "MainActivity.java"), encoding="utf-8").read()
         self.assertIn("public void choosePc()", java)
