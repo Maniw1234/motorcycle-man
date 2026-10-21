@@ -80,8 +80,8 @@ import java.util.List;
 // button, a scanned QR code on Android 11 and older, or be pasted by hand. If the PC's address
 // changes, the app finds it again with the link's secret it already has.
 // The app's web view has no speech API, so the phone's own speech recognition listens for the page.
-// The app updates itself from the PC: when the PC has a newer app, it offers it, downloads it and hands
-// it to Android's installer.
+// The app updates itself from the PC, or from GitHub's newest release: when either has a newer app, it offers
+// it, downloads it and hands it to Android's installer.
 public class MainActivity extends Activity {
     // What the widget, the quick-settings tile and the share sheet ask the page to do: "listen", "screen" or
     // "remote" (EXTRA_DO), or a command to ask Motorcycle Man (EXTRA_ASK).
@@ -95,6 +95,9 @@ public class MainActivity extends Activity {
     private static final String INSTALL_STATUS = "app.motorcycleman.remote.INSTALL_STATUS";  // Android's answer about an update
     private static final String UPDATE_FILE = "MotorcycleMan-update.apk";  // the new app, downloaded into the app's cache
     private static final long UPDATE_REST_MS = 6 * 60 * 60 * 1000L;  // after Not now, it asks again this much later
+    private static final String KEY_GITHUB_CHECKED = "github_checked";  // when GitHub last answered about its app
+    private static final long GITHUB_CHECK_EVERY_MS = 6 * 60 * 60 * 1000L;
+    private static final long GITHUB_RETRY_MS = 10 * 60 * 1000L;  // after GitHub couldn't be reached
     private static final String NOT_FOUND = "Couldn't find Motorcycle Man on this Wi-Fi. Open Motorcycle Man on your PC and make sure "
             + "the phone is on the same Wi-Fi; this keeps looking. Or paste the link from the Motorcycle Man window below.";
     private static final String ALLOW_MICROPHONE = "Allow Motorcycle Man to use the microphone, then hold the helmet again.";
@@ -136,6 +139,7 @@ public class MainActivity extends Activity {
     private boolean updated;  // this app was updated since it last started; the page says so once it's open
     private boolean resumed;
     private boolean checkingUpdate;
+    private long gitHubTried;  // when the app last asked GitHub, answered or not
     private static final int PICK_FILES = 7;  // Android's file picker, for files to send to the PC
     private static final int ASK_NOTIFICATIONS = 2;  // asking to show the watch's notification
     private static final int ASK_SMS = 3;  // asking to read and send texts, for commands by text message
@@ -147,9 +151,7 @@ public class MainActivity extends Activity {
     private Dialog updateDialog;  // "Update the Motorcycle Man app", while it's up
     private TextView updateMessage;
     private LinearLayout updateButtons;
-    private String updateBase;  // where the update comes from: the PC's address and the link's secret
-    private String updateToken;
-    private AppUpdate.Offer updateOffer;
+    private AppUpdate.Offer updateOffer;  // the app on offer, and where it comes from
     private File downloadedUpdate;  // waits for the app to be in front before Android is asked to install it
     private int updateSession = -1;  // the update Android is installing
     private final Runnable searchAgain = new Runnable() {
@@ -297,6 +299,7 @@ public class MainActivity extends Activity {
         if (downloadedUpdate != null) {
             installUpdate();  // it finished downloading while the app was in the background
         }
+        checkGitHub();
     }
 
     @Override
@@ -1052,7 +1055,40 @@ public class MainActivity extends Activity {
                         checkingUpdate = false;
                         if (offer != null && offer.code > appVersion && updateDialog == null && !isFinishing()
                                 && !isDestroyed()) {
-                            offerUpdate(base, token, offer);
+                            offerUpdate(offer);
+                        }
+                    }
+                });
+            }
+        }).start();
+    }
+
+    // GitHub's newest release, looked at when the app comes to the front: at most every six hours, or ten minutes
+    // after GitHub couldn't be reached. When its app is newer than this one, the app offers it, unless the user
+    // said Not now a short while ago.
+    private void checkGitHub() {
+        long now = System.currentTimeMillis(), later = prefs().getLong(KEY_UPDATE_LATER, 0);
+        long checked = prefs().getLong(KEY_GITHUB_CHECKED, 0);
+        if (checkingUpdate || updateDialog != null || (now >= later && now - later < UPDATE_REST_MS)
+                || (now >= checked && now - checked < GITHUB_CHECK_EVERY_MS) || now - gitHubTried < GITHUB_RETRY_MS) {
+            return;
+        }
+        gitHubTried = now;
+        checkingUpdate = true;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final AppUpdate.Offer offer = AppUpdate.checkGitHub();
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        checkingUpdate = false;
+                        if (offer != null) {
+                            prefs().edit().putLong(KEY_GITHUB_CHECKED, System.currentTimeMillis()).apply();
+                        }
+                        if (offer != null && offer.code > appVersion && updateDialog == null && !isFinishing()
+                                && !isDestroyed()) {
+                            offerUpdate(offer);
                         }
                     }
                 });
@@ -1061,9 +1097,7 @@ public class MainActivity extends Activity {
     }
 
     // "Update the Motorcycle Man app": a small window in Motorcycle Man's colours, like the rest of the app.
-    private void offerUpdate(String base, String token, AppUpdate.Offer offer) {
-        updateBase = base;
-        updateToken = token;
+    private void offerUpdate(AppUpdate.Offer offer) {
         updateOffer = offer;
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
@@ -1113,7 +1147,8 @@ public class MainActivity extends Activity {
                 updateLater();  // the back button
             }
         });
-        String words = (offer.name.isEmpty() ? "A new Motorcycle Man app" : "Motorcycle Man " + offer.name) + " is ready on your PC. "
+        String words = (offer.name.isEmpty() ? "A new Motorcycle Man app" : "Motorcycle Man " + offer.name)
+                + (offer.fromPc ? " is ready on your PC. " : " is ready. ")
                 + "Android asks you to OK the update, and the app closes while it updates; then just open Motorcycle Man "
                 + "again. Your link and settings stay.";
         if (Build.VERSION.SDK_INT >= 26 && !getPackageManager().canRequestPackageInstalls()) {
@@ -1163,18 +1198,16 @@ public class MainActivity extends Activity {
         }
     }
 
-    // Downloads the new app from the PC into the app's cache, showing how far it got.
+    // Downloads the new app from the PC or GitHub into the app's cache, showing how far it got.
     private void downloadUpdate() {
-        final String getting = "Getting the new app from your PC…";
+        final AppUpdate.Offer offer = updateOffer;
+        final String getting = offer.fromPc ? "Getting the new app from your PC…" : "Getting the new app…";
         updateWorking(getting);
         final File file = new File(getCacheDir(), UPDATE_FILE);
-        final String base = updateBase;
-        final String token = updateToken;
-        final long size = updateOffer.size;
         new Thread(new Runnable() {
             @Override
             public void run() {
-                final String problem = AppUpdate.download(base, token, size, file, new AppUpdate.Progress() {
+                final String problem = AppUpdate.download(offer, file, new AppUpdate.Progress() {
                     private long shown = -1;
 
                     @Override
@@ -1224,7 +1257,8 @@ public class MainActivity extends Activity {
         if (info == null || !getPackageName().equals(info.packageName) || info.versionCode <= appVersion) {
             file.delete();
             updateChoice(info == null ? "The new app arrived damaged. Try again."
-                    : "The app on your PC isn't newer than this one after all.", "Try again");
+                    : updateOffer.fromPc ? "The app on your PC isn't newer than this one after all."
+                    : "That app isn't newer than this one after all.", "Try again");
             return;
         }
         updateWorking("Handing it to Android…");
@@ -1283,9 +1317,11 @@ public class MainActivity extends Activity {
             // Other apps can open this app too, so only Android's question about an install is opened
             // (android.content.pm.action.CONFIRM_INSTALL, or CONFIRM_PERMISSIONS on Android 7 and 8).
             if (question != null && String.valueOf(question.getAction()).startsWith("android.content.pm.action.CONFIRM_")) {
-                // and never with a right to read or write this app's files passed along with it
-                question.removeFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                        | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+                // and never with a right to read or write this app's files passed along with it (setFlags:
+                // removeFlags is Android 8's, and this app runs on 7)
+                question.setFlags(question.getFlags() & ~(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        | Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                        | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION));
                 try {
                     startActivity(question);  // Android's own question, over this app
                     return;

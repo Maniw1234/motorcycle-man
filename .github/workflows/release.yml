@@ -1,6 +1,7 @@
 # Every push to main builds Motorcycle Man.exe and the Android app and publishes them as a release named
 # "build-<run number>", with SHA256SUMS.txt. Installed copies of Motorcycle Man find it (Windows/app_update.py),
-# offer the update and install it when the user says so; phones then get the Android app from their PC.
+# offer the update and install it when the user says so. Phones get the Android app from their PC, or from here:
+# phone-app.json says its version, size and SHA-256 (Android/src/.../AppUpdate.java reads it).
 # The Android app is built only when the ANDROID_KEYSTORE_B64 secret holds the signing key (base64), because
 # phones accept an update only when it is signed with the same key as the app they have.
 name: Build and release
@@ -76,6 +77,18 @@ jobs:
           $lines = foreach ($file in Get-ChildItem -File release) { "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLower(), $file.Name }
           $lines | Set-Content -Encoding ascii release/SHA256SUMS.txt
           Get-Content release/SHA256SUMS.txt
+          if (Test-Path release/MotorcycleMan.apk) {
+            $manifest = Get-Content -Raw Android/AndroidManifest.xml
+            $apk = Get-Item release/MotorcycleMan.apk
+            [ordered]@{
+              versionCode = [int][regex]::Match($manifest, 'android:versionCode="(\d+)"').Groups[1].Value
+              versionName = [regex]::Match($manifest, 'android:versionName="([^"]+)"').Groups[1].Value
+              size = $apk.Length
+              sha256 = (Get-FileHash -Algorithm SHA256 $apk.FullName).Hash.ToLower()
+              url = "https://github.com/${{ github.repository }}/releases/download/build-${{ github.run_number }}/MotorcycleMan.apk"
+            } | ConvertTo-Json | Set-Content -Encoding ascii release/phone-app.json
+            Get-Content release/phone-app.json
+          }
 
       - name: Release
         shell: pwsh

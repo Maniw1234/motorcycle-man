@@ -28,6 +28,8 @@ repository (Security tab), not in a public issue. Include what you found and how
   signatures.
 - **Updates** come only from this repository's GitHub releases, over HTTPS, are checked against the release's
   `SHA256SUMS.txt` (so a broken download is never run), and install only when you pick **Install update**.
+  The Android app checks its download against the release's `phone-app.json` and asks first, and Android
+  installs it only when it is signed with the same key as the app already on the phone.
   Whoever can push to `main` or publish a release here can ship a new exe to everyone who installs it, so
   the maintainer's GitHub account should have two-factor sign-in on.
 

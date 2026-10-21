@@ -82,8 +82,10 @@ Every push to `main` builds Motorcycle Man.exe and the Android app on GitHub
 `build-<number>`, with a `SHA256SUMS.txt`. Motorcycle Man.exe looks for a newer release a minute after it
 starts and every six hours. When there is one, Motorcycle Man tells you, and its menu by the clock gets
 **Install update**. Nothing installs until you pick it: then it downloads the new exe, checks it against
-`SHA256SUMS.txt`, closes, and comes back as the new version. Phones get the new Android app from the PC as
-before, when its version number has gone up. A copy you built yourself counts as build 0, so it's offered the
+`SHA256SUMS.txt`, closes, and comes back as the new version. The Android app (2.8 and newer) looks at the
+newest release itself when you open it, at most every six hours, with no PC needed: when its version number
+has gone up, it offers the update, checks the download against the release's `phone-app.json`, and Android
+asks you to OK it. Phones also still get the new app from the PC. A copy you built yourself counts as build 0, so it's offered the
 newest release. To stop looking for updates, set `"check_updates": false` in
 `%APPDATA%\Motorcycle Man\settings.json`. A fork changes `UPDATE_REPO` in `Windows\app_update.py`.
 
