@@ -35,6 +35,7 @@ import pc_settings
 import screen_time
 import shared_lists
 import ai_providers
+import pc_capture
 from PySide6.QtCore import (
     QAbstractAnimation, QByteArray, QEasingCurve, QEvent, QObject, QPointF, QRectF, Qt, QTimer, QVariantAnimation, Signal
 )
@@ -930,6 +931,22 @@ def setup_logging():
 
 
 CRASHES = {"file": None}  # crash.log, kept open so a crash can still be written down
+CRASH_LOG_LIMIT, CRASH_LOG_KEEP = 256_000, 128_000  # bytes: past the limit, only the newest part is kept
+
+
+def trim_crash_log(path: str):
+    # Windows' COM notes errors it then handles itself (code 0x80040155 from the spoken replies' voice, October
+    # 2026), and faulthandler writes those down as if they were crashes, so the file would only grow.
+    try:
+        if os.path.getsize(path) <= CRASH_LOG_LIMIT:
+            return
+        with open(path, "rb") as f:
+            f.seek(-CRASH_LOG_KEEP, os.SEEK_END)
+            tail = f.read()
+        with open(path, "wb") as f:
+            f.write(tail[tail.find(b"\n") + 1:])
+    except OSError:
+        pass
 
 
 def watch_for_crashes():
@@ -947,7 +964,12 @@ def watch_for_crashes():
     sys.excepthook = uncaught  # also errors in the window's code, which Qt otherwise prints to nowhere
     threading.excepthook = uncaught_in_thread
     try:
-        CRASHES["file"] = open(os.path.join(app_data_dir(), "crash.log"), "a", encoding="utf-8")
+        path = os.path.join(app_data_dir(), "crash.log")
+        trim_crash_log(path)
+        CRASHES["file"] = open(path, "a", encoding="utf-8")
+        CRASHES["file"].write(time.strftime("--- Motorcycle Man started %Y-%m-%d %H:%M:%S. Not every note below is a crash: "
+                                            "Windows notes some errors it handles itself. ---\n"))
+        CRASHES["file"].flush()
         faulthandler.enable(CRASHES["file"], all_threads=True)
     except OSError:
         LOG.warning("Can't keep a crash log", exc_info=True)
@@ -3006,9 +3028,9 @@ padKeys.addEventListener('keydown', event => {
 // the view, and the bar types and presses keys. Two quick taps make a double click, as with a mouse.
 const screenView = document.getElementById('screenView'), screenCanvas = document.getElementById('screenCanvas');
 const screenStage = document.getElementById('screenStage');
-const SCREEN_QUALITIES = {smooth: ['Smooth', 10], sharp: ['Sharp', 5], saver: ['Data saver', 3]};  // name, pictures a second
+const SCREEN_QUALITIES = {smooth: ['Smooth', 24], sharp: ['Sharp', 12], saver: ['Data saver', 5]};  // name, most pictures a second
 const pcScreen = {on: false, run: 0, aspect: 1.6, z: 1, cx: 0.5, cy: 0.5, whole: null, close: null, wholeAt: 0,
-                   cursor: null, seen: '', quality: 'smooth', ctl: null};
+                   cursor: null, seen: '', quality: 'smooth', ctl: null, tags: {}, askedFor: {}, drawing: Promise.resolve()};
 try { if (SCREEN_QUALITIES[localStorage.getItem('screenQuality')]) pcScreen.quality = localStorage.getItem('screenQuality'); } catch (e) {}
 let screenPress = null, screenPinch = null, screenMoving = null, screenMoveBusy = false;
 const screenFingers = new Map();
@@ -3077,12 +3099,12 @@ async function screenLoop(run) {
     } else if (zoomed) {
       width = 900;  // the whole screen behind a close-up only needs to be roughly right
     }
-    const slot = whole ? 'whole' : 'close', had = pcScreen[slot];
-    const sameRegion = had && had.asked.join() === region.join();
+    const slot = whole ? 'whole' : 'close';
+    const sameRegion = pcScreen.askedFor[slot] === region.join();
     try {
       pcScreen.ctl = new AbortController();
       const res = await fetch(requestUrl('/screen.jpg', {x0: region[0].toFixed(4), y0: region[1].toFixed(4), x1: region[2].toFixed(4),
-        y1: region[3].toFixed(4), w: Math.round(width), q: pcScreen.quality, since: sameRegion ? had.tag : '', cursor: pcScreen.seen}),
+        y1: region[3].toFixed(4), w: Math.round(width), q: pcScreen.quality, since: sameRegion ? pcScreen.tags[slot] || '' : '', cursor: pcScreen.seen}),
         {cache: 'no-store', signal: pcScreen.ctl.signal});
       if (!res.ok) throw new Error(res.status);
       const sizes = (res.headers.get('X-Screen') || '').split(',').map(Number);
@@ -3090,14 +3112,21 @@ async function screenLoop(run) {
       pcScreen.seen = res.headers.get('X-Cursor') || '';
       pcScreen.cursor = pcScreen.seen ? pcScreen.seen.split(',').map(Number) : null;
       if (res.status === 200) {
-        const bitmap = await createImageBitmap(await res.blob());
-        if (!pcScreen.on || pcScreen.run !== run) { if (bitmap.close) bitmap.close(); return; }
-        screenKeep(slot, {bitmap, region: (res.headers.get('X-Region') || '0,0,1,1').split(',').map(Number),
-                          tag: res.headers.get('X-Frame') || '', asked: region});
+        const blob = await res.blob(), tag = res.headers.get('X-Frame') || '';
+        const placed = (res.headers.get('X-Region') || '0,0,1,1').split(',').map(Number);
+        pcScreen.tags[slot] = tag;  // known at once, so the next question doesn't fetch this picture again
+        pcScreen.askedFor[slot] = region.join();
         if (whole) pcScreen.wholeAt = performance.now();
-        document.getElementById('screenWait').style.display = 'none';
+        // Drawn while the next picture is already being asked for: decoding no longer holds up the next question.
+        pcScreen.drawing = pcScreen.drawing.then(() => createImageBitmap(blob)).then(bitmap => {
+          if (!pcScreen.on || pcScreen.run !== run) { if (bitmap.close) bitmap.close(); return; }
+          screenKeep(slot, {bitmap, region: placed, tag, asked: region});
+          document.getElementById('screenWait').style.display = 'none';
+          screenDraw();
+        }).catch(() => {});
+      } else {
+        screenDraw();
       }
-      screenDraw();
     } catch (e) {
       if (!pcScreen.on || pcScreen.run !== run) return;
       if (e.name === 'AbortError') continue;  // the view changed: ask again for what's in it now
@@ -3114,7 +3143,7 @@ function openScreen() {
   document.getElementById('screenWait').style.display = '';
   document.getElementById('screenWait').textContent = "Connecting to the PC's screen...";
   document.getElementById('screenQuality').textContent = SCREEN_QUALITIES[pcScreen.quality][0];
-  Object.assign(pcScreen, {on: true, run: pcScreen.run + 1, z: 1, cx: 0.5, cy: 0.5, seen: ''});
+  Object.assign(pcScreen, {on: true, run: pcScreen.run + 1, z: 1, cx: 0.5, cy: 0.5, seen: '', tags: {}, askedFor: {}});
   screenKeep('whole', null);
   screenKeep('close', null);
   screenDraw();
@@ -8855,7 +8884,14 @@ def describe_window_controls(hwnd, sw, sh, iw, ih, limit=MAX_CONTROLS):
             cache.AddProperty(prop)
         clickable = client.CreateOrConditionFromArray(
             [client.CreatePropertyCondition(UIA.UIA_ControlTypePropertyId, t) for t in UIA_CLICKABLE_TYPES])
-        found = client.ElementFromHandle(hwnd).FindAllBuildCache(UIA.TreeScope_Descendants, clickable, cache)
+        for attempt in (1, 2):
+            try:
+                found = client.ElementFromHandle(hwnd).FindAllBuildCache(UIA.TreeScope_Descendants, clickable, cache)
+                break
+            except Exception:  # "An event was unable to invoke any of the subscribers" passed by a moment later (October 2026)
+                if attempt == 2:
+                    raise
+                time.sleep(0.2)
         controls = []
         for i in range(found.Length):
             element = found.GetElement(i)
@@ -9629,7 +9665,7 @@ def scroll_window_in_front(bridge, direction: str, notches: int, slowly: bool) -
 # it. The phone's taps, long presses, drags, scrolls, keys and typing are done there.
 SCREEN_QUALITY = {"saver": (40, 800), "smooth": (60, 1280), "sharp": (85, 2560)}  # JPEG quality, widest picture
 SCREEN_WAIT = 1.5  # seconds an unchanged screen is waited on before "nothing new"
-SCREEN_LOOK = 0.15  # seconds between looks while it waits
+SCREEN_LOOK = 0.03  # seconds between looks at the pointer while it waits (the picture itself comes when it changes)
 SCREEN_KEYS = {"enter", "esc", "backspace", "tab", "up", "down", "left", "right", "space", "delete", "win"}
 SCREEN_DRAG_IDLE = 8.0  # seconds a drag can go without a word from the phone before the button is let go
 SCREEN_DRAG = {"timer": None}
@@ -9665,6 +9701,70 @@ def screen_picture(region, width: int, quality: int, shot=None):
     buf = io.BytesIO()
     (part if part.mode == "RGB" else part.convert("RGB")).save(buf, format="JPEG", quality=quality)
     return buf.getvalue(), {"region": (left / sw, top / sh, right / sw, bottom / sh), "screen": (sw, sh)}
+
+
+class ScreenFeed:
+    # The screen view's pictures, made by one helper thread while a phone watches: when the screen changes
+    # (pc_capture says so the moment it does), the picture the phone last asked for (its part of the screen, size
+    # and quality) is made at once. A phone's question is then answered as it arrives, instead of after a fresh
+    # grab (about 50 ms) and the next look (every 0.15 s), as before October 2026. The helper stops a few seconds
+    # after the last question.
+    IDLE_SECONDS = 5.0
+
+    def __init__(self, source=None):
+        self.cond = threading.Condition()
+        self.wanted, self.dirty, self.picture, self.asked_at, self.thread = None, False, None, 0.0, None
+        self._source = source
+
+    def ask(self, region, width: int, quality: int, since: str, seen: str, cursor, wait: float):
+        # (picture, fresh): fresh when it differs from the phone's last (since); otherwise it waits up to wait
+        # seconds for a change, or for the pointer to leave where the phone saw it (seen; cursor() says where).
+        settings = (tuple(region), int(width), int(quality))
+        end = time.monotonic() + wait
+        with self.cond:
+            self.asked_at = time.monotonic()
+            if settings != self.wanted:
+                self.wanted, self.dirty = settings, True
+            if self.thread is None or not self.thread.is_alive():
+                self.thread = threading.Thread(target=self._run, name="screen view", daemon=True)
+                self.thread.start()
+            self.cond.notify_all()
+            while True:
+                picture = self.picture
+                ready = picture is not None and picture["settings"] == settings
+                if ready and picture["tag"] != since:
+                    return picture, True
+                if (ready and cursor() != seen) or time.monotonic() >= end:  # the pointer moved: told without a picture
+                    return (picture if ready else None), False
+                self.cond.wait(SCREEN_LOOK)
+
+    def _run(self):
+        source = self._source or pc_capture.ScreenSource()
+        try:
+            while time.monotonic() - self.asked_at < self.IDLE_SECONDS:
+                with self.cond:
+                    hurry = self.dirty and source.latest is not None  # another part or size: made from the last picture
+                changed = source.wait_for_change(0.001 if hurry else 0.1)
+                with self.cond:
+                    settings, dirty = self.wanted, self.dirty
+                    self.dirty = False
+                if source.latest is None or settings is None or not (changed or dirty or self.picture is None):
+                    continue
+                data, info = screen_picture(settings[0], settings[1], settings[2], shot=source.latest)
+                with self.cond:
+                    self.picture = {"settings": settings, "data": data, "info": info, "tag": format(hash(data) & 0xFFFFFFFF, "08x")}
+                    self.cond.notify_all()
+        except Exception:
+            LOG.exception("The screen view's pictures stopped")
+        finally:
+            if self._source is None:
+                source.close()
+            with self.cond:
+                if self.thread is threading.current_thread():
+                    self.thread = None
+
+
+SCREEN_FEED = ScreenFeed()
 
 
 # Open windows on the phone (pc_windows): what the taskbar shows, front to back, with each program's icon; the
@@ -12082,7 +12182,12 @@ def _execute_smart_action_locked(cmd: str, bridge: Bridge, sw: int, sh: int, wav
                 # Nothing from a rejected plan has run. Gemini gets one chance to correct it.
                 LOG.warning("Plan rejected: %s", exc)
                 publish_task_status(bridge, f"Status: Step {step} — asking {ai_name()} to fix its plan...", running=True)
-                parts = parts[:-1] + [{"text": parts[-1]["text"] + f"\nYour previous plan was rejected: {exc} Return a corrected plan."}]
+                hint = ""
+                if "number of a control" in str(exc):
+                    hint = (f" The controls list has numbers 1 to {len(control_centers)}. If what you want to click isn't in it, "
+                            "use a click with x and y read from the screenshot instead." if control_centers else
+                            " No controls could be listed this time: use a click with x and y read from the screenshot.")
+                parts = parts[:-1] + [{"text": parts[-1]["text"] + f"\nYour previous plan was rejected: {exc}{hint} Return a corrected plan."}]
                 try:
                     plan = call_gemini_planner(parts, key)
                     actions = validate_action_plan(plan, img_w, img_h, set(control_centers))
@@ -13563,11 +13668,40 @@ def make_phone_handler(bridge, sw, sh):
     # What answers the phone: the page, its requests, and the ways in without the link's secret.
     # sw and sh are the screen's size, for commands.
     class Handler(http.server.BaseHTTPRequestHandler):
+        # Connections stay open for the next question when an answer says its length (HTTP/1.1): the screen view
+        # and the status checks used to open a new connection for every picture and every check. An answer
+        # without a length, a POST, or a turned-away body closes its connection, as before.
+        protocol_version = "HTTP/1.1"
+        timeout = 75  # an idle connection is let go (the phone's longest wait, for its inbox, is 50 s)
+
+        def setup(self):
+            super().setup()
+            # Sent at once: on a kept connection, an answer's body waited for the phone to acknowledge its headers,
+            # up to 200 ms a picture (measured October 2026).
+            try:
+                self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except OSError:
+                pass
+
+        def send_response(self, code, message=None):
+            self._status, self._sized = code, False
+            super().send_response(code, message)
+
+        def send_header(self, keyword, value):
+            if keyword.lower() == "content-length":
+                self._sized = True
+            super().send_header(keyword, value)
+
         def end_headers(self):
             # The page's address carries the link's secret: it never goes to other sites as the Referer.
             self.send_header("Referrer-Policy", "no-referrer")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("X-Frame-Options", "SAMEORIGIN")
+            if getattr(self, "_status", 200) in (204, 304):
+                self._sized = True  # nothing follows these
+            if self.close_connection or not getattr(self, "_sized", False):
+                self.close_connection = True
+                super().send_header("Connection", "close")
             super().end_headers()
 
         def do_GET(self):
@@ -13581,6 +13715,7 @@ def make_phone_handler(bridge, sw, sh):
                     body = f.read()
                 self.send_response(200)
                 self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
                 return
@@ -13589,6 +13724,7 @@ def make_phone_handler(bridge, sw, sh):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/javascript; charset=utf-8")
                 self.send_header("Cache-Control", "no-cache")
+                self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
                 return
@@ -13608,6 +13744,7 @@ def make_phone_handler(bridge, sw, sh):
                 self.send_response(status)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
                 return
@@ -13650,6 +13787,7 @@ def make_phone_handler(bridge, sw, sh):
                 body = json.dumps(answer).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))  # so the connection stays open for the next check
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(body)
@@ -13663,6 +13801,7 @@ def make_phone_handler(bridge, sw, sh):
                 self.send_response(200)
                 self.send_header("Content-Type", "application/manifest+json; charset=utf-8")
                 self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
                 return
@@ -13671,6 +13810,7 @@ def make_phone_handler(bridge, sw, sh):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
                 return
@@ -13720,6 +13860,7 @@ def make_phone_handler(bridge, sw, sh):
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
                 return
@@ -13904,6 +14045,7 @@ def make_phone_handler(bridge, sw, sh):
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
                 return
@@ -13920,11 +14062,13 @@ def make_phone_handler(bridge, sw, sh):
             body = phone_page().encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
 
         def do_POST(self):
             # What the phone sends: text for the PC's clipboard, and photos and files.
+            self.close_connection = True  # a body read only in part must never be taken for the next question
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path.startswith("/alexa/"):  # the user's Alexa skill, at its secret address (see alexa_skill)
                 try:
@@ -14112,29 +14256,27 @@ def make_phone_handler(bridge, sw, sh):
             except (ValueError, OverflowError):
                 width = 1280
             region, since, seen = screen_region(q), q.get("since", [""])[0], q.get("cursor", [""])[0]
-            end = time.monotonic() + SCREEN_WAIT
-            while True:
-                picture, info = screen_picture(region, width, quality)
-                sw, sh = info["screen"]
+            size = [sw, sh]
+
+            def cursor_now():
                 cx, cy = Win32Input.get_cursor_pos()
-                cursor, tag = f"{cx / sw:.4f},{cy / sh:.4f}", format(hash(picture) & 0xFFFFFFFF, "08x")
-                fresh = tag != since
-                if fresh or cursor != seen or time.monotonic() >= end:
-                    break
-                time.sleep(SCREEN_LOOK)
+                return f"{cx / max(1, size[0]):.4f},{cy / max(1, size[1]):.4f}"
+            picture, fresh = SCREEN_FEED.ask(region, width, quality, since, seen, cursor_now, SCREEN_WAIT)
+            if picture is not None:
+                size[:] = picture["info"]["screen"]
             PHONE_CONTACT["time"] = time.monotonic()
             self.send_response(200 if fresh else 204)
             self.send_header("Cache-Control", "no-store")
-            self.send_header("X-Cursor", cursor)
-            self.send_header("X-Screen", f"{sw},{sh}")
+            self.send_header("X-Cursor", cursor_now())
+            self.send_header("X-Screen", f"{size[0]},{size[1]}")
             if fresh:
                 self.send_header("Content-Type", "image/jpeg")
-                self.send_header("Content-Length", str(len(picture)))
-                self.send_header("X-Frame", tag)
-                self.send_header("X-Region", ",".join(f"{v:.5f}" for v in info["region"]))
+                self.send_header("Content-Length", str(len(picture["data"])))
+                self.send_header("X-Frame", picture["tag"])
+                self.send_header("X-Region", ",".join(f"{v:.5f}" for v in picture["info"]["region"]))
             self.end_headers()
             if fresh:
-                self.wfile.write(picture)
+                self.wfile.write(picture["data"])
 
         def drain(self, length: int):
             # A body that's turned away is still read (up to 1 MB): closing with it unread makes Windows cut the
@@ -14147,6 +14289,7 @@ def make_phone_handler(bridge, sw, sh):
             body = json.dumps(answer).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)

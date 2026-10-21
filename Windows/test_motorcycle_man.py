@@ -587,6 +587,19 @@ class ExecutorLoopTests(unittest.TestCase):
         self.assertIn("previous plan was rejected: Action 1: click.x must be inside the 500x400 screenshot", retry_text)
         self.assertEqual([call.args[0]["type"] for call in run.call_args_list], ["press_key"])
 
+    def test_a_control_number_not_on_the_list_gets_told_to_click_by_place(self):
+        plans = [
+            plan([{"type": "click_element", "id": 999}]),
+            plan([{"type": "click", "x": 100, "y": 100}]),
+            plan([], "Done.", done=True),
+        ]
+        result, _bridge, gemini, run, _ask, _capture = self.run_task("Click the blue button", plans, screen=(1000, 800, 500, 400))
+        self.assertEqual(result, "Done.")
+        retry_text = gemini.call_args_list[1].args[0][-1]["text"]
+        self.assertIn("click_element.id must be the number of a control", retry_text)
+        self.assertIn("use a click with x and y read from the screenshot", retry_text)
+        self.assertEqual([call.args[0]["type"] for call in run.call_args_list], ["click"])
+
     def test_rejected_plans_run_none_of_their_actions_and_stop_after_three_tries(self):
         bad = plan([{"type": "press_key", "key": "enter"}, {"type": "run_shell", "command": "must never run"}])
         result, _bridge, gemini, run, _ask, _capture = self.run_task("Press Enter safely", [bad] * 6)
@@ -2359,6 +2372,19 @@ class ScreenViewTests(unittest.TestCase):
         port = self.serve()
         self.showing = b"\xff\xd8one\xff\xd9"
 
+        class Screen:  # stands in for pc_capture.ScreenSource: it says when the screen changed
+            latest, changed = object(), threading.Event()
+
+            def wait_for_change(self, seconds):
+                if self.changed.wait(seconds):
+                    self.changed.clear()
+                    return True
+                return False
+
+            def close(self):
+                pass
+        screen = Screen()
+
         def picture(region, width, quality, shot=None):
             self.asked = (region, width, quality)
             return self.showing, {"region": region, "screen": (2560, 1600)}
@@ -2371,7 +2397,7 @@ class ScreenViewTests(unittest.TestCase):
             connection.close()
             return answer
 
-        with mock.patch.object(app, "screen_picture", side_effect=picture), mock.patch.object(app, "SCREEN_LOOK", 0.01), \
+        with mock.patch.object(app, "screen_picture", side_effect=picture), mock.patch.object(app, "SCREEN_FEED", app.ScreenFeed(screen)), \
                 mock.patch.object(app, "SCREEN_WAIT", 0.3), mock.patch.object(app.Win32Input, "get_cursor_pos", return_value=(640, 400)):
             status, headers, body = get("x0=0.25&y0=0.25&x1=0.75&y1=0.75&w=9999&q=sharp")
             self.assertEqual((status, body, headers["Content-Type"]), (200, b"\xff\xd8one\xff\xd9", "image/jpeg"))
@@ -2384,8 +2410,11 @@ class ScreenViewTests(unittest.TestCase):
             self.assertEqual((status, body), (204, b""))  # unchanged for a moment: nothing new
             self.assertGreater(time.monotonic() - started, 0.25)
             self.showing = b"\xff\xd8two\xff\xd9"
+            screen.changed.set()  # the screen changes
+            started = time.monotonic()
             status, _, body = get(f"since={first['X-Frame']}&cursor=0.2500,0.2500")
             self.assertEqual((status, body), (200, b"\xff\xd8two\xff\xd9"))  # changed: at once
+            self.assertLess(time.monotonic() - started, 0.25)
         self.assertEqual(self.asked[1:], (1280, 60))  # smooth, unless asked
 
 
