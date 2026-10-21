@@ -23,6 +23,10 @@ Studio).
   PC.
 - **Other ways in, if you set them up:** Telegram, Discord, email, WhatsApp/Instagram (Meta's API), Alexa,
   Siri Shortcuts, and text messages to your phone.
+- **A welcome tour and a Guide:** five slides the first time you open the PC app or the phone app (once, not
+  after updates), and a Guide with every feature, how to use it and how it works: the Guide button in the PC
+  window or its tray menu, and Guide in the phone's menu. Their words are in
+  [shared/guide.json](shared/guide.json), which both apps read.
 
 ## How it works
 

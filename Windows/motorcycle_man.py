@@ -12,6 +12,7 @@ import xml.etree.ElementTree as ET
 import faulthandler
 import keep_running
 import app_update
+import guide
 from PIL import Image, ImageChops, ImageGrab, ImageStat
 import helmet_face
 import bike_rider
@@ -52,7 +53,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication, QDialog, QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QMainWindow, QMenu, QSystemTrayIcon,
-    QComboBox, QPushButton, QTextBrowser, QVBoxLayout, QWidget, QLineEdit, QMessageBox
+    QComboBox, QPushButton, QTextBrowser, QVBoxLayout, QWidget, QLineEdit, QMessageBox, QListWidget, QListWidgetItem
 )
 try:
     import qrcode
@@ -2573,6 +2574,7 @@ PHONE_PAGE = r"""<!DOCTYPE html>
       <button class="rb" onclick="fromMenu(openRoutines)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l4 4-4 4"/><path d="M3 11V9a3 3 0 0 1 3-3h15"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v2a3 3 0 0 1-3 3H3"/></svg><span>Routines</span></button>
       <button class="rb" onclick="fromMenu(openSiriGuide)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg><span>Siri</span></button>
       <button class="rb" onclick="fromMenu(openPaint)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="14" height="6" rx="1.5"/><path d="M17 6h3v6h-8v3"/><rect x="10.5" y="15" width="3" height="6" rx="1"/></svg><span>Paint</span></button>
+      <button class="rb" onclick="fromMenu(openGuide)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5z"/><path d="M4 20.5A2.5 2.5 0 0 0 6.5 23H20v-5"/><path d="M12 7.5v.01M12 10.5v4"/></svg><span>Guide</span></button>
       <button class="rb" onclick="fromMenu(openReminders)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2M5 3L2 6M19 3l3 3"/></svg><span>Reminders</span></button>
       <button class="rb" id="textsBtn" style="display:none" onclick="fromMenu(() => window.MotorcycleManAndroid.smsSettings())"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 21l1.9-5.4A8 8 0 1 1 21 12z"/><path d="M8.5 11.5h.01M12 11.5h.01M15.5 11.5h.01"/></svg><span>Texts</span></button>
       <button class="rb" id="noticesBtn" aria-pressed="false" style="display:none" onclick="toggleNotices()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9a6 6 0 0 1 12 0c0 6 2.5 7.5 2.5 7.5h-17S6 15 6 9z"/><path d="M10.3 20a2 2 0 0 0 3.4 0"/></svg><span>Alerts off</span></button>
@@ -3550,6 +3552,11 @@ function arrangeMenu() {
 function toggleMenuMore() { menuMoreOpen = !menuMoreOpen; arrangeMenu(); }
 function closeMenu() { document.getElementById('menuModal').style.display = 'none'; }
 function fromMenu(open) { closeMenu(); open(); }
+// Every feature and how it works: the app's own window in the Android app, else the PC's guide page.
+function openGuide() {
+  if (window.MotorcycleManAndroid && window.MotorcycleManAndroid.openGuide) { window.MotorcycleManAndroid.openGuide(); return; }
+  location.href = '/guide?token=' + encodeURIComponent(new URLSearchParams(location.search).get('token') || '');
+}
 // Files: the PC's folders (see browse on the PC). A folder opens; a file can be saved here, opened on the PC or
 // shown in its folder (Find's buttons); and files from the phone can go into the folder shown.
 let filesHere = {id: '', parent: null};
@@ -5078,7 +5085,7 @@ def phone_page() -> str:
         _PHONE_PAGES[paint] = build_phone_page(paint)
     return _PHONE_PAGES[paint]
 PHONE_REQUESTS = {"/status", "/history", "/reminders", "/routines", "/paint", "/shortcut", "/ask", "/pad", "/slides", "/power", "/health", "/find", "/brief", "/hold_start", "/hold_stop", "/listen_stop", "/confirm", "/cmd", "/stop",
-                  "/app_version", "/app.apk", "/manifest.webmanifest", "/remote", "/clipboard", "/open_link", "/upload", "/files", "/file", "/screen.jpg", "/screen_input", "/screen_sound", "/screenshot.png", "/screen_text", "/windows", "/window_icon", "/phone_inbox", "/clip_sync", "/media", "/media_art", "/mixer", "/settings", "/browse", "/guard", "/screen_time", "/focus", "/lists", "/gamepad"}
+                  "/app_version", "/app.apk", "/manifest.webmanifest", "/remote", "/clipboard", "/open_link", "/upload", "/files", "/file", "/screen.jpg", "/screen_input", "/screen_sound", "/screenshot.png", "/screen_text", "/windows", "/window_icon", "/guide", "/phone_inbox", "/clip_sync", "/media", "/media_art", "/mixer", "/settings", "/browse", "/guard", "/screen_time", "/focus", "/lists", "/gamepad"}
 
 
 def web_app_manifest(token: str) -> dict:
@@ -8342,6 +8349,199 @@ class AiDialog(QDialog):
         self.accept()
 
 
+_GUIDE = {}
+
+
+def guide_data() -> dict:
+    # The tour and the feature guide (shared/guide.json, see guide.py), read once.
+    if not _GUIDE:
+        _GUIDE.update(guide.load(guide.guide_path(resource_path)))
+    return _GUIDE
+
+
+class TourDialog(QDialog):
+    # The welcome tour: five slides about everything Motorcycle Man does. It opens by itself the first time its
+    # window is shown, and never again (settings.json keeps "tour_seen", which updates leave alone); the Guide
+    # can play it again.
+    MOODS = ("happy", "opening", "listening", "typing", "cool")
+
+    def __init__(self, window, slides: list, open_guide):
+        super().__init__(window)
+        self.slides = slides or [{"icon": "👋", "title": "Hi, I'm Motorcycle Man!",
+                                  "text": "Open the Guide in my window for everything I can do."}]
+        self.open_guide, self.at = open_guide, 0
+        self.setWindowTitle("Welcome to Motorcycle Man")
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setStyleSheet(WINDOW_STYLE + "QDialog { background: #0B1026; }")
+        self.setFixedSize(470, 420)
+        box = QVBoxLayout(self)
+        box.setContentsMargins(30, 24, 30, 20)
+        box.setSpacing(12)
+        self.face = FaceWidget(104, "happy")
+        box.addWidget(self.face, 0, Qt.AlignmentFlag.AlignHCenter)
+        self.title = QLabel()
+        self.title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.title.setWordWrap(True)
+        self.title.setStyleSheet("font-size: 22px; font-weight: 800;")
+        box.addWidget(self.title)
+        self.text = QLabel()
+        self.text.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+        self.text.setWordWrap(True)
+        self.text.setStyleSheet("font-size: 14px; color: #CBD5E1;")
+        box.addWidget(self.text, 1)
+        self.dots = QLabel()
+        self.dots.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        box.addWidget(self.dots)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.skip = QPushButton()
+        self.skip.setObjectName("secondary")
+        self.skip.clicked.connect(self.skip_or_guide)
+        row.addWidget(self.skip)
+        row.addStretch(1)
+        self.back = QPushButton("Back")
+        self.back.setObjectName("secondary")
+        self.back.clicked.connect(lambda: self.show_slide(self.at - 1))
+        row.addWidget(self.back)
+        self.next = QPushButton()
+        self.next.setObjectName("primary")
+        self.next.clicked.connect(self.go_next)
+        row.addWidget(self.next)
+        for button in (self.skip, self.back, self.next):
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+        box.addLayout(row)
+        self.show_slide(0)
+
+    def last(self) -> bool:
+        return self.at == len(self.slides) - 1
+
+    def show_slide(self, at: int):
+        self.at = max(0, min(at, len(self.slides) - 1))
+        slide = self.slides[self.at]
+        self.face.set_mood(self.MOODS[self.at % len(self.MOODS)])
+        self.title.setText(f"{slide.get('icon', '')}  {slide.get('title', '')}".strip())
+        self.text.setText(str(slide.get("text", "")))
+        self.dots.setText("&nbsp;&nbsp;".join(f"<span style='color:{'#FFC83D' if i == self.at else '#2E3A72'};"
+                                              f" font-size: 16px;'>●</span>" for i in range(len(self.slides))))
+        self.back.setVisible(self.at > 0)
+        self.next.setText("Let's go!" if self.last() else "Next")
+        self.skip.setText("See every feature" if self.last() else "Skip")
+        self.next.setDefault(True)
+
+    def go_next(self):
+        if self.last():
+            self.close()
+        else:
+            self.show_slide(self.at + 1)
+
+    def skip_or_guide(self):
+        guide_too = self.last()
+        self.close()
+        if guide_too:
+            self.open_guide()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Right:
+            self.go_next()
+        elif event.key() == Qt.Key.Key_Left:
+            self.show_slide(self.at - 1)
+        else:
+            super().keyPressEvent(event)
+
+
+class FeatureGuideDialog(QDialog):
+    # Every feature and how it works: the features down the left (with a search box), the chosen one's details on
+    # the right: what it does, how to use it, how it works and what it needs.
+    def __init__(self, window, features: list, replay_tour):
+        super().__init__(window)
+        self.features = features
+        self.setWindowTitle("Motorcycle Man: Guide")
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setStyleSheet(WINDOW_STYLE + "QDialog { background: #0B1026; }"
+                           "QListWidget { background: #121A3A; color: #E2E8F0; border: 1px solid #232D5C;"
+                           " border-radius: 14px; padding: 6px; font-family: 'Segoe UI'; font-size: 13px; outline: none; }"
+                           "QListWidget::item { padding: 8px 8px; border-radius: 9px; }"
+                           "QListWidget::item:selected { background: #24306A; color: #FFC83D; }"
+                           "QListWidget::item:hover { background: #1C2550; }"
+                           "QTextBrowser { background: #121A3A; color: #E2E8F0; border: 1px solid #232D5C;"
+                           " border-radius: 14px; padding: 14px 18px; font-family: 'Segoe UI'; font-size: 14px; }")
+        self.resize(820, 580)
+        self.setMinimumSize(640, 440)
+        box = QVBoxLayout(self)
+        box.setContentsMargins(22, 20, 22, 18)
+        box.setSpacing(12)
+        top = QHBoxLayout()
+        top.setSpacing(12)
+        top.addWidget(FaceWidget(46, "happy"))
+        heading = QVBoxLayout()
+        heading.setSpacing(0)
+        title = QLabel("Everything I can do")
+        title.setStyleSheet("font-size: 20px; font-weight: 800;")
+        heading.addWidget(title)
+        hint = QLabel(f"{len(features)} features. Pick one to see how to use it and how it works.")
+        hint.setObjectName("hint")
+        heading.addWidget(hint)
+        top.addLayout(heading, 1)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search: files, music, away from home...")
+        self.search.setFixedWidth(260)
+        self.search.textChanged.connect(self.filter)
+        top.addWidget(self.search, 0, Qt.AlignmentFlag.AlignVCenter)
+        box.addLayout(top)
+        middle = QHBoxLayout()
+        middle.setSpacing(12)
+        self.list = QListWidget()
+        self.list.setFixedWidth(270)
+        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.list.setWordWrap(True)
+        for feature in features:
+            item = QListWidgetItem(f"{feature.get('icon', '')}  {feature.get('title', '')}")
+            item.setData(Qt.ItemDataRole.UserRole, feature)
+            self.list.addItem(item)
+        self.list.currentItemChanged.connect(self.show_feature)
+        middle.addWidget(self.list)
+        self.details = QTextBrowser()
+        self.details.setOpenExternalLinks(True)
+        self.details.document().setDefaultStyleSheet(
+            "h2 { color: #F8FAFC; font-size: 20px; } h3 { color: #FFC83D; font-size: 11px; margin-top: 16px; }"
+            "p { line-height: 125%; } p.where { color: #8B95C9; } li { margin-bottom: 6px; }")
+        middle.addWidget(self.details, 1)
+        box.addLayout(middle, 1)
+        row = QHBoxLayout()
+        replay = QPushButton("Play the welcome tour")
+        replay.setObjectName("secondary")
+        replay.clicked.connect(lambda: (self.close(), replay_tour()))
+        row.addWidget(replay)
+        row.addStretch(1)
+        done = QPushButton("Done")
+        done.setObjectName("primary")
+        done.clicked.connect(self.close)
+        row.addWidget(done)
+        for button in (replay, done):
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+        box.addLayout(row)
+        if self.list.count():
+            self.list.setCurrentRow(0)
+
+    def show_feature(self, item, _previous=None):
+        if item is not None:
+            self.details.setHtml(guide.feature_html(item.data(Qt.ItemDataRole.UserRole)))
+
+    def filter(self, text: str):
+        first = None
+        for row in range(self.list.count()):
+            item = self.list.item(row)
+            shown = guide.matches(item.data(Qt.ItemDataRole.UserRole), text)
+            item.setHidden(not shown)
+            if shown and first is None:
+                first = item
+        if first is not None and (self.list.currentItem() is None or self.list.currentItem().isHidden()):
+            self.list.setCurrentItem(first)
+        elif first is None:
+            self.details.setHtml(f"<p class='where'>Nothing about \u201c{html.escape(text)}\u201d. "
+                                 "Try another word.</p>")
+
+
 class ControlCenterWindow(QMainWindow):
     # Motorcycle Man's window on the PC: its face and status, the phone's QR code and link, the Gemini key,
     # Telegram, and a box to try a command.
@@ -8386,9 +8586,23 @@ class ControlCenterWindow(QMainWindow):
         names.addWidget(subtitle)
         names.addStretch(1)
         header.addLayout(names, 1)
+        right = QVBoxLayout()
+        right.setSpacing(8)
+        right.addStretch(1)
         self.pill = QLabel()
-        header.addWidget(self.pill, 0, Qt.AlignmentFlag.AlignVCenter)
+        right.addWidget(self.pill, 0, Qt.AlignmentFlag.AlignRight)
+        guide_btn = QPushButton("Guide")
+        guide_btn.setObjectName("secondary")
+        guide_btn.setToolTip("Everything Motorcycle Man can do, and how it works")
+        guide_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        guide_btn.setStyleSheet("padding: 5px 14px;")
+        guide_btn.clicked.connect(self.open_guide)
+        right.addWidget(guide_btn, 0, Qt.AlignmentFlag.AlignRight)
+        right.addStretch(1)
+        header.addLayout(right)
         layout.addLayout(header)
+        # The welcome tour, the first time this window shows (main turns it on; see showEvent).
+        self.welcome_tour, self.tour_dialog, self.guide_dialog = False, None, None
 
         phone, box = self._card("CONNECT YOUR PHONE")
         row = QHBoxLayout()
@@ -8554,6 +8768,31 @@ class ControlCenterWindow(QMainWindow):
 
         button.toggled.connect(flip)
         return button
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self.welcome_tour and not load_settings().get("tour_seen"):
+            QTimer.singleShot(500, self.open_tour)
+
+    def open_tour(self):
+        # Noted as seen the moment it opens, so it never comes back, even if Motorcycle Man is closed meanwhile.
+        save_setting("tour_seen", True)
+        if self.tour_dialog is not None:
+            self.tour_dialog.raise_()
+            return
+        self.tour_dialog = TourDialog(self, guide_data()["tour"]["pc"], self.open_guide)
+        self.tour_dialog.destroyed.connect(lambda: setattr(self, "tour_dialog", None))
+        self.tour_dialog.show()
+        self.tour_dialog.raise_()
+        self.tour_dialog.activateWindow()
+
+    def open_guide(self):
+        if self.guide_dialog is None:
+            self.guide_dialog = FeatureGuideDialog(self, guide_data()["features"], self.open_tour)
+            self.guide_dialog.destroyed.connect(lambda: setattr(self, "guide_dialog", None))
+        self.guide_dialog.show()
+        self.guide_dialog.raise_()
+        self.guide_dialog.activateWindow()
 
     def closeEvent(self, event):
         # The × puts Motorcycle Man away by the clock, where it keeps answering the phone (it used to quit,
@@ -14029,6 +14268,18 @@ def make_phone_handler(bridge, sw, sh):
                     self.send_json({"text": "", "say": "Windows can't read text here: it needs a language with text "
                                                        "recognition (Settings > Time & language)."})
                 return
+            if parsed.path == "/guide":  # every feature and how it works (guide.html, which the app shows too)
+                with open(guide.page_path(resource_path), encoding="utf-8") as f:
+                    template = f.read()
+                token = urllib.parse.parse_qs(parsed.query).get("token", [""])[0]
+                body = guide.phone_page(template, guide_data(), "/?token=" + urllib.parse.quote(token)).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if parsed.path == "/screenshot.png":
                 picture = screenshot_png()
                 name = time.strftime("PC screen %Y-%m-%d %H.%M.%S.png")
@@ -14432,6 +14683,7 @@ def fill_tray_menu(menu: QMenu, window, bridge, sw: int, sh: int):
         menu.addAction(f"Install update (build {UPDATE['release']['build']})",
                        lambda: threading.Thread(target=install_update, args=(bridge,), daemon=True).start())
     menu.addAction("Open Motorcycle Man", lambda: (window.showNormal(), window.raise_(), window.activateWindow()))
+    menu.addAction("Guide: everything I can do", window.open_guide)
     menu.addAction("Talk  (Ctrl+Alt+M)", lambda: threading.Thread(target=listen_and_run, args=(bridge, sw, sh), daemon=True).start())
     routines_menu = menu.addMenu("Routines")
     for routine in ROUTINES.all():
@@ -14572,6 +14824,7 @@ def main():
         chats=CHAT_SERVICES,
         bluetooth=bluetooth,
     )
+    ctrl.welcome_tour = True
     bridge.screen_hide_sig.connect(ctrl.step_aside)
 
     def repaint(name: str):

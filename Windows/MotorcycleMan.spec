@@ -9,6 +9,9 @@ datas = [('motorcycle_man.ico', '.'), ('motorcycle_man_icon.png', '.'), ('motorc
 version_file = os.path.join(SPECPATH, 'version.json')
 if os.path.isfile(version_file):
     datas.append((version_file, '.'))
+# The welcome tour and the feature guide, shared with the Android app (guide.py).
+datas.append((os.path.normpath(os.path.join(SPECPATH, '..', 'shared', 'guide.json')), '.'))
+datas.append((os.path.normpath(os.path.join(SPECPATH, '..', 'shared', 'guide.html')), '.'))
 if os.path.isfile(phone_app):
     datas.append((phone_app, '.'))
 else:

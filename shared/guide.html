@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<!-- The phone's welcome tour and feature guide. The words come from guide.json: the Android app (Guide.java) and
+     Motorcycle Man on the PC (/guide, see guide.py) put them in place of GUIDE_JSON and choose the MODE. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Motorcycle Man: Guide</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+html, body { margin: 0; background: #0B1026; color: #F8FAFC; }
+body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-tap-highlight-color: transparent; }
+button { font: inherit; cursor: pointer; }
+
+/* The guide */
+header { position: sticky; top: 0; z-index: 2; background: #0B1026; padding: 14px 16px 10px;
+         padding-top: calc(14px + env(safe-area-inset-top)); border-bottom: 1px solid #1C2550; }
+.top { display: flex; align-items: center; gap: 12px; max-width: 760px; margin: 0 auto; }
+.top h1 { font-size: 20px; margin: 0; flex: 1; }
+.top small { display: block; color: #8B95C9; font-size: 12.5px; font-weight: 400; margin-top: 2px; }
+.pill { background: #1C2550; color: #E2E8F0; border: 1px solid #2E3A72; border-radius: 12px; padding: 9px 14px;
+        font-size: 14px; font-weight: 700; }
+#search { display: block; width: 100%; max-width: 760px; margin: 10px auto 0; background: #121A3A; color: #F8FAFC;
+          border: 1px solid #2E3A72; border-radius: 12px; padding: 11px 13px; font-size: 15px; outline: none; }
+#search:focus { border-color: #60A5FA; }
+main { max-width: 760px; margin: 0 auto; padding: 4px 16px calc(28px + env(safe-area-inset-bottom)); }
+details { background: #121A3A; border: 1px solid #232D5C; border-radius: 16px; margin: 10px 0; }
+summary { list-style: none; padding: 13px 16px; display: flex; gap: 12px; align-items: center; cursor: pointer; }
+summary::-webkit-details-marker { display: none; }
+summary .i { font-size: 24px; width: 32px; text-align: center; flex: none; }
+summary .t { flex: 1; min-width: 0; }
+summary b { font-size: 16px; display: block; }
+summary small { color: #8B95C9; font-size: 12.5px; }
+summary::after { content: "\203A"; color: #8B95C9; font-size: 24px; transition: transform 0.2s; }
+details[open] summary::after { transform: rotate(90deg); }
+details[open] { border-color: #2E3A72; }
+.body { padding: 0 16px 14px 60px; color: #CBD5E1; font-size: 14.5px; line-height: 1.45; }
+.body p { margin: 0 0 4px; }
+.body h3 { color: #FFC83D; font-size: 11.5px; letter-spacing: 1px; margin: 14px 0 6px; }
+.body ul { margin: 0; padding-left: 18px; }
+.body li { margin: 5px 0; }
+.empty { color: #8B95C9; text-align: center; padding: 34px 0; }
+.again { display: block; margin: 18px auto 0; }
+
+/* The tour */
+.tour { min-height: 100vh; display: flex; flex-direction: column; text-align: center;
+        padding: calc(26px + env(safe-area-inset-top)) 24px calc(20px + env(safe-area-inset-bottom)); }
+.slide { flex: 1; display: flex; flex-direction: column; align-items: center; animation: slide-in 0.28s ease; }
+@keyframes slide-in { from { opacity: 0; transform: translateX(18px); } }
+.art { width: 132px; height: 132px; margin: 4vh auto 14px; border-radius: 50%; display: grid; place-items: center;
+       font-size: 64px; background: radial-gradient(circle, #2A3778 0%, #141C44 55%, rgba(11, 16, 38, 0) 72%); }
+.slide h2 { font-size: 25px; margin: 6px 0 10px; }
+.slide p { color: #CBD5E1; font-size: 16.5px; line-height: 1.5; margin: 0 auto; max-width: 440px; }
+.dots { display: flex; gap: 8px; justify-content: center; margin: 18px 0; }
+.dots span { width: 9px; height: 9px; border-radius: 5px; background: #2E3A72; transition: all 0.2s; }
+.dots span.on { background: #FFC83D; width: 24px; }
+.row { display: flex; gap: 10px; max-width: 440px; width: 100%; margin: 0 auto; }
+.row button { flex: 1; border-radius: 14px; padding: 14px 10px; font-size: 16px; font-weight: 800; border: none; }
+.go { background: #FFC83D; color: #1A1305; }
+.soft { background: #1C2550; color: #E2E8F0; box-shadow: inset 0 0 0 1px #2E3A72; }
+/* A phone on its side (the app is): the picture beside the words */
+@media (orientation: landscape) and (max-height: 540px) {
+  .tour { padding-top: calc(14px + env(safe-area-inset-top)); }
+  .slide { flex-direction: row; gap: 26px; text-align: left; justify-content: center; max-width: 720px; margin: 0 auto; }
+  .art { width: 116px; height: 116px; font-size: 56px; margin: 0; flex: none; }
+  .slide h2 { font-size: 22px; margin-top: 0; }
+  .slide p { font-size: 15.5px; margin: 0; }
+  .dots { margin: 10px 0 12px; }
+}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+const GUIDE = /*GUIDE_JSON*/{};
+let mode = /*MODE*/"guide";
+// Where Back goes on the PC's page; in the app, window.MMGuide closes the window instead.
+const BACK = /*BACK*/"";
+const slides = ((GUIDE.tour || {}).phone || []).slice(0, 5);
+const features = GUIDE.features || [];
+const app = document.getElementById('app');
+
+function el(tag, attrs, ...children) {
+  const node = document.createElement(tag);
+  Object.entries(attrs || {}).forEach(([key, value]) => {
+    if (key === 'onclick') node.addEventListener('click', value);
+    else node.setAttribute(key, value);
+  });
+  children.forEach(child => node.append(child));  // text goes in as text, never as HTML
+  return node;
+}
+
+// Puts these in place of what node had (replaceChildren, which older phones' WebViews lack).
+function put(node, ...children) {
+  node.textContent = '';
+  children.forEach(child => node.append(child));
+}
+
+function closeGuide() {
+  if (window.MMGuide) MMGuide.close();
+  else if (history.length > 1) history.back();
+  else if (BACK) location.href = BACK;
+}
+
+// The tour: one slide at a time, with Next, Back, Skip and a swipe either way.
+let at = 0;
+function showTour() {
+  mode = 'tour';
+  const slide = slides[at] || {};
+  const last = at === slides.length - 1;
+  const dots = el('div', {class: 'dots'});
+  slides.forEach((_, i) => dots.append(el('span', {class: i === at ? 'on' : ''})));
+  const row = el('div', {class: 'row'},
+    el('button', {class: 'soft', onclick: () => last ? showGuide() : closeGuide()}, last ? 'Every feature' : 'Skip'),
+    el('button', {class: 'go', onclick: () => last ? closeGuide() : (at++, showTour())}, last ? "Let's go!" : 'Next'));
+  if (at > 0) row.insertBefore(el('button', {class: 'soft', onclick: () => { at--; showTour(); }}, 'Back'), row.lastChild);
+  put(app, el('div', {class: 'tour'},
+    el('div', {class: 'slide'}, el('div', {class: 'art', 'aria-hidden': 'true'}, slide.icon || ''),
+      el('div', {}, el('h2', {}, slide.title || ''), el('p', {}, slide.text || ''))),
+    dots, row));
+}
+let swipeFrom = null;
+document.addEventListener('touchstart', e => { swipeFrom = e.touches[0].clientX; }, {passive: true});
+document.addEventListener('touchend', e => {
+  if (mode !== 'tour' || swipeFrom === null) return;
+  const moved = e.changedTouches[0].clientX - swipeFrom;
+  swipeFrom = null;
+  if (moved < -60 && at < slides.length - 1) { at++; showTour(); }
+  else if (moved > 60 && at > 0) { at--; showTour(); }
+});
+
+// The guide: every feature, tap one for how to use it and how it works; the search finds words anywhere in it.
+function words(feature) {
+  return [feature.title, feature.where, feature.what, feature.how, feature.needs, ...(feature.use || [])].join(' ').toLowerCase();
+}
+function card(feature) {
+  const body = el('div', {class: 'body'});
+  if (feature.what) body.append(el('p', {}, feature.what));
+  if ((feature.use || []).length) {
+    body.append(el('h3', {}, 'HOW TO USE IT'), el('ul', {}, ...feature.use.map(step => el('li', {}, step))));
+  }
+  if (feature.how) body.append(el('h3', {}, 'HOW IT WORKS'), el('p', {}, feature.how));
+  if (feature.needs) body.append(el('h3', {}, 'YOU NEED'), el('p', {}, feature.needs));
+  return el('details', {},
+    el('summary', {}, el('span', {class: 'i', 'aria-hidden': 'true'}, feature.icon || ''),
+      el('span', {class: 't'}, el('b', {}, feature.title || ''), el('small', {}, feature.where || ''))),
+    body);
+}
+function showGuide() {
+  mode = 'guide';
+  const search = el('input', {id: 'search', type: 'search', placeholder: 'Search: files, music, away from home...',
+                              autocomplete: 'off', enterkeyhint: 'search'});
+  const list = el('main', {});
+  const fill = () => {
+    const wanted = search.value.toLowerCase().split(/\s+/).filter(Boolean);
+    const found = features.filter(f => wanted.every(word => words(f).includes(word)));
+    put(list, ...found.map(card));
+    if (!found.length) list.append(el('p', {class: 'empty'}, 'Nothing about that. Try another word.'));
+    if (found.length === 1) list.firstChild.open = true;
+    if (slides.length) list.append(el('button', {class: 'pill again', onclick: () => { at = 0; showTour(); }}, 'Play the welcome tour'));
+  };
+  search.addEventListener('input', fill);
+  put(app, el('header', {},
+    el('div', {class: 'top'},
+      el('h1', {}, 'Everything I can do', el('small', {}, `${features.length} features. Tap one to see how it works.`)),
+      el('button', {class: 'pill', onclick: closeGuide}, window.MMGuide ? 'Close' : 'Back')),
+    search), list);
+  fill();
+  window.scrollTo(0, 0);
+}
+
+if (mode === 'tour' && slides.length) showTour(); else showGuide();
+</script>
+</body>
+</html>

@@ -73,7 +73,7 @@ class StickerTests(unittest.TestCase):
         menu, bridge = QMenu(), mock.Mock()
         app.fill_tray_menu(menu, mock.Mock(), bridge, 1000, 800)
         titles = [action.text() for action in menu.actions() if not action.isSeparator()]
-        self.assertEqual(titles, ["Open Motorcycle Man", "Talk  (Ctrl+Alt+M)", "Routines", "Reminders", "Paint job",
+        self.assertEqual(titles, ["Open Motorcycle Man", "Guide: everything I can do", "Talk  (Ctrl+Alt+M)", "Routines", "Reminders", "Paint job",
                                   "Find my phone", "Guard my PC while I'm away", "Quiet", "Stop what it's doing",
                                   "Quit Motorcycle Man"])
         with mock.patch.object(app, "ring_phone", return_value="Ringing your phone.") as ring:

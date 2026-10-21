@@ -17,14 +17,18 @@ function Invoke-Tool($exe, [string[]]$arguments) {
     if ($LASTEXITCODE -ne 0) { throw "$(Split-Path $exe -Leaf) failed with exit code $LASTEXITCODE" }
 }
 
-Remove-Item "$BuildDir\classes", "$BuildDir\gen", "$BuildDir\classes.dex", "$BuildDir\classes.jar", "$BuildDir\resources.zip", "$BuildDir\*.apk" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item "$BuildDir\classes", "$BuildDir\gen", "$BuildDir\classes.dex", "$BuildDir\classes.jar", "$BuildDir\resources.zip", "$BuildDir\assets", "$BuildDir\*.apk" -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force "$BuildDir\classes", "$BuildDir\gen" | Out-Null
 
 # The launcher icons in res\ come from Icons\make_icons.py.
 Invoke-Tool "$BuildTools\aapt2.exe" @("compile", "--dir", "$AndroidDir\res", "-o", "$BuildDir\resources.zip")
 
+# The welcome tour and the guide, whose words the PC shares (..\shared), go in as the app's assets.
+New-Item -ItemType Directory -Force "$BuildDir\assets" | Out-Null
+Copy-Item "$AndroidDir\..\shared\guide.json", "$AndroidDir\..\shared\guide.html" "$BuildDir\assets"
+
 # Linked first, so R.java (the widget's layout and views) is there for the Java to use.
-Invoke-Tool "$BuildTools\aapt2.exe" @("link", "-o", "$BuildDir\unaligned.apk", "-I", $AndroidJar, "--manifest", "$AndroidDir\AndroidManifest.xml", "--java", "$BuildDir\gen", "$BuildDir\resources.zip")
+Invoke-Tool "$BuildTools\aapt2.exe" @("link", "-o", "$BuildDir\unaligned.apk", "-I", $AndroidJar, "--manifest", "$AndroidDir\AndroidManifest.xml", "--java", "$BuildDir\gen", "-A", "$BuildDir\assets", "$BuildDir\resources.zip")
 $sources = (Get-ChildItem "$AndroidDir\src", "$BuildDir\gen" -Recurse -Filter *.java).FullName
 Invoke-Tool "$Jdk\bin\javac.exe" (@("-encoding", "UTF-8", "-source", "1.8", "-target", "1.8", "-nowarn", "-bootclasspath", $AndroidJar, "-d", "$BuildDir\classes") + $sources)
 # In one jar: the list of class files grew too long for a Windows command line.

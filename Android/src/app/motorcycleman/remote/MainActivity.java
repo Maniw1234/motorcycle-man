@@ -185,6 +185,16 @@ public class MainActivity extends Activity {
         } else {
             openOrFind(url);
         }
+        if (Guide.tourDue(prefs())) {
+            // The first time the app opens (and never again, updates included): the welcome tour.
+            prefs().edit().putBoolean(Guide.KEY_TOUR_SEEN, true).apply();
+            handler.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    Guide.show(MainActivity.this, "tour");
+                }
+            }, 400);
+        }
     }
 
     // Opens the saved link if Motorcycle Man answers there; otherwise starts looking right away (the PC may
@@ -1457,6 +1467,17 @@ public class MainActivity extends Activity {
             });
         }
 
+        // The page's Guide tile: every feature and how it works, from the app's own copy.
+        @JavascriptInterface
+        public void openGuide() {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    Guide.show(MainActivity.this, "guide");
+                }
+            });
+        }
+
         @JavascriptInterface
         public void stopListening() {
             runOnUiThread(new Runnable() {
@@ -1873,6 +1894,15 @@ public class MainActivity extends Activity {
         });
         bluetoothButton.setVisibility(View.GONE);
         content.addView(bluetoothButton, spaced(ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        Button guide = pillButton("Guide: everything I can do", false);
+        guide.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                Guide.show(MainActivity.this, "guide");
+            }
+        });
+        content.addView(guide, spaced(ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView manual = new TextView(this);
         manual.setText("Or paste the link from the Motorcycle Man window on your PC:");
