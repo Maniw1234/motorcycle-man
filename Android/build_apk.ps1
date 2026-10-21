@@ -17,7 +17,7 @@ function Invoke-Tool($exe, [string[]]$arguments) {
     if ($LASTEXITCODE -ne 0) { throw "$(Split-Path $exe -Leaf) failed with exit code $LASTEXITCODE" }
 }
 
-Remove-Item "$BuildDir\classes", "$BuildDir\gen", "$BuildDir\classes.dex", "$BuildDir\classes.jar", "$BuildDir\resources.zip", "$BuildDir\*.apk" -Recurse -Force -ErrorAction SilentlyContinue -ErrorAction SilentlyContinue
+Remove-Item "$BuildDir\classes", "$BuildDir\gen", "$BuildDir\classes.dex", "$BuildDir\classes.jar", "$BuildDir\resources.zip", "$BuildDir\*.apk" -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force "$BuildDir\classes", "$BuildDir\gen" | Out-Null
 
 # The launcher icons in res\ come from Icons\make_icons.py.
