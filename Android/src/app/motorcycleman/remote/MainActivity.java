@@ -139,6 +139,8 @@ public class MainActivity extends Activity {
     private boolean updated;  // this app was updated since it last started; the page says so once it's open
     private boolean resumed;
     private boolean checkingUpdate;
+    private boolean checkingNow;  // "Check for updates" in Settings is asking the PC and GitHub
+    private int pcAppWaiting;  // the PC's app version, heard while another check ran; looked at when that ends
     private long gitHubTried;  // when the app last asked GitHub, answered or not
     private static final int PICK_FILES = 7;  // Android's file picker, for files to send to the PC
     private static final int ASK_NOTIFICATIONS = 2;  // asking to show the watch's notification
@@ -1043,7 +1045,13 @@ public class MainActivity extends Activity {
     private void pcHasApp(int version) {
         long later = prefs().getLong(KEY_UPDATE_LATER, 0), now = System.currentTimeMillis();
         String url = prefs().getString(KEY_URL, null);
-        if (version <= appVersion || url == null || checkingUpdate || updateDialog != null
+        if (version > appVersion && (checkingUpdate || checkingNow)) {
+            // Another check is running (often GitHub's, as the app comes to the front): this one waits for it,
+            // rather than being dropped until the page says it again five minutes later.
+            pcAppWaiting = Math.max(pcAppWaiting, version);
+            return;
+        }
+        if (version <= appVersion || url == null || updateDialog != null
                 || (now >= later && now - later < UPDATE_REST_MS)
                 || !isPcAddress(Uri.parse(String.valueOf(web.getUrl())))) {
             return;
@@ -1067,6 +1075,7 @@ public class MainActivity extends Activity {
                                 && !isDestroyed()) {
                             offerUpdate(offer);
                         }
+                        checkEnded();
                     }
                 });
             }
@@ -1100,10 +1109,68 @@ public class MainActivity extends Activity {
                                 && !isDestroyed()) {
                             offerUpdate(offer);
                         }
+                        checkEnded();
                     }
                 });
             }
         }).start();
+    }
+
+    // A check has ended: the PC's version that came in meanwhile gets its turn now, unless an update is on offer.
+    private void checkEnded() {
+        int version = pcAppWaiting;
+        pcAppWaiting = 0;
+        if (version > 0 && updateDialog == null && !checkingUpdate && !checkingNow && !isFinishing() && !isDestroyed()) {
+            pcHasApp(version);
+        }
+    }
+
+    // "Check for updates" in Settings: asks the PC (over the saved link) and GitHub at once, whatever Not now and
+    // the six-hour wait say, then offers the newest app or tells the page how it stands (window.onUpdateCheck).
+    private void checkForUpdatesNow() {
+        if (checkingNow || !isPcAddress(Uri.parse(String.valueOf(web.getUrl())))) {
+            return;
+        }
+        if (updateDialog != null) {
+            tellUpdateCheck("The update window is already open.");
+            return;
+        }
+        checkingNow = true;
+        prefs().edit().remove(KEY_UPDATE_LATER).apply();  // asked for: offers are welcome again
+        String url = prefs().getString(KEY_URL, null);
+        final Uri uri = url == null ? null : Uri.parse(url);
+        final String token = uri == null ? null : uri.getQueryParameter("token");
+        final String base = uri == null ? null : uri.getScheme() + "://" + uri.getEncodedAuthority();
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final AppUpdate.Offer pc = token == null ? null : AppUpdate.check(base, token);
+                final AppUpdate.Offer gitHub = AppUpdate.checkGitHub();
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        checkingNow = false;
+                        if (gitHub != null) {
+                            prefs().edit().putLong(KEY_GITHUB_CHECKED, System.currentTimeMillis()).apply();
+                        }
+                        AppUpdate.Offer best = AppUpdate.newest(pc, gitHub, appVersion);
+                        if (best != null && updateDialog == null && !isFinishing() && !isDestroyed()) {
+                            offerUpdate(best);
+                            tellUpdateCheck((best.name.isEmpty() ? "A new version" : "Version " + best.name) + " is ready.");
+                        } else if (best == null && (pc != null || gitHub != null)) {
+                            tellUpdateCheck("Up to date: this app is " + appVersionName + ".");
+                        } else if (best == null) {
+                            tellUpdateCheck("Couldn't reach your PC or GitHub. Try again in a moment.");
+                        }
+                        checkEnded();
+                    }
+                });
+            }
+        }).start();
+    }
+
+    private void tellUpdateCheck(String words) {
+        callPage("onUpdateCheck", JSONObject.quote(words));
     }
 
     // "Update the Motorcycle Man app": a small window in Motorcycle Man's colours, like the rest of the app.
@@ -1154,7 +1221,9 @@ public class MainActivity extends Activity {
         updateDialog.setOnCancelListener(new DialogInterface.OnCancelListener() {
             @Override
             public void onCancel(DialogInterface dialog) {
-                updateLater();  // the back button
+                // Back only closes the window. Only Not now waits before offering again: Back used to wait six
+                // hours too, and a phone stayed on 2.8 with 3.0 out on the PC and on GitHub.
+                closeUpdate();
             }
         });
         String words = (offer.name.isEmpty() ? "A new Motorcycle Man app" : "Motorcycle Man " + offer.name)
@@ -1601,6 +1670,23 @@ public class MainActivity extends Activity {
                     MainActivity.this.pcHasApp(version);
                 }
             });
+        }
+
+        // "Check for updates" in Settings; the answer comes back through window.onUpdateCheck.
+        @JavascriptInterface
+        public void checkForUpdates() {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    MainActivity.this.checkForUpdatesNow();
+                }
+            });
+        }
+
+        // This app's version, as people see it ("3.1"), for Settings.
+        @JavascriptInterface
+        public String appVersion() {
+            return appVersionName;
         }
     }
 

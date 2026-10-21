@@ -365,7 +365,7 @@
       "what": "Every switch in one place: this phone's, the PC's, the paint job, other PCs and help.",
       "use": [
         "Open the menu and tap Settings, or the gear at the top.",
-        "This phone: spoken replies, phone alerts on the PC, watch, full screen and text commands.",
+        "This phone: spoken replies, phone alerts on the PC, watch, full screen, text commands and Check for updates.",
         "On the PC: voice, engine sounds, Quiet, \"Hey Motorcycle Man\", morning brief, clipboard sync, start with Windows and updates."
       ],
       "how": "The PC's switches are kept on the PC, so every phone and the PC window show the same ones."
@@ -377,7 +377,7 @@
       "what": "New versions arrive by themselves, and nothing installs until you say so.",
       "use": [
         "PC: when Motorcycle Man says an update is ready, right-click the icon by the clock > Install update.",
-        "Phone: when the app offers an update, tap Update, then OK on Android's question.",
+        "Phone: when the app offers an update, tap Update, then OK on Android's question. To look right away, tap Check for updates in Menu > Settings.",
         "Don't want them? Turn off Look for updates in Menu > Settings."
       ],
       "how": "Every change to Motorcycle Man is built on GitHub. Downloads are checked against their published fingerprints, and Android installs the phone app only when it's signed with the same key."

@@ -87,6 +87,18 @@ final class AppUpdate {
         return new Offer(code, name == null ? "" : name, size, url, sha256.toLowerCase(), false);
     }
 
+    // Of the PC's and GitHub's offers (either may be missing), the newest one that is newer than the app that's
+    // installed, or null when there is none. The PC's wins a tie: it comes over the Wi-Fi or the PC's own link.
+    static Offer newest(Offer pc, Offer gitHub, int installed) {
+        Offer best = null;
+        for (Offer offer : new Offer[] {pc, gitHub}) {
+            if (offer != null && offer.code > installed && (best == null || offer.code > best.code)) {
+                best = offer;
+            }
+        }
+        return best;
+    }
+
     private static long size(String json) {
         Matcher size = Pattern.compile("\"size\"\\s*:\\s*(\\d{1,12})").matcher(json);
         return size.find() ? Long.parseLong(size.group(1)) : -1;

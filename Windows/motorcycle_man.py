@@ -2609,6 +2609,7 @@ PHONE_PAGE = r"""<!DOCTYPE html>
     <label class="switch-row pref" id="rowWatch" style="display:none"><span>Watch<small>A notification your watch shows, to talk to the PC from it</small></span><input type="checkbox" id="prefWatch" onchange="toggleWatch()"></label>
     <label class="switch-row pref"><span>Full screen<small>Hide the phone's status and navigation bars</small></span><input type="checkbox" id="prefFull" onchange="toggleFullscreen()"></label>
     <button class="pref-link" id="rowTexts" style="display:none" onclick="fromPrefs(() => window.MotorcycleManAndroid.smsSettings())"><span>Text commands<small>Run commands by texting this phone with your PIN</small></span><b>&rsaquo;</b></button>
+    <button class="pref-link" id="rowAppUpdate" style="display:none" onclick="checkAppUpdate()"><span>Check for updates<small id="appUpdateSay">Look for a new version of this app now</small></span><b>&rsaquo;</b></button>
     <div class="send-part">ON THE PC</div>
     <label class="switch-row pref"><span>Voice on the PC<small>Answers and reminders out loud on the PC</small></span><input type="checkbox" data-pref="voice_replies"></label>
     <label class="switch-row pref"><span>Engine sounds<small>The bike's engine when it rides off and does tricks</small></span><input type="checkbox" data-pref="engine_sounds"></label>
@@ -3594,6 +3595,7 @@ function fromMenu(open) { closeMenu(); open(); }
 // and the Guide, all in one place.
 function openPrefs() {
   showTalkBack();
+  showAppUpdate();
   document.getElementById('prefFull').checked = !!document.fullscreenElement;
   if (watchApp) showWatch(watchApp.watchOn());
   if (noticesApp) showNotices(noticesApp.noticesOn());
@@ -3604,6 +3606,28 @@ function openPrefs() {
   askPrefs({});
 }
 function closePrefs() { document.getElementById('prefsModal').style.display = 'none'; }
+// Inside the Motorcycle Man app (3.1 and newer), Check for updates asks the PC and GitHub right away, whatever the
+// app's own waits say (it looks by itself at most every six hours, and not for six hours after Not now). The app
+// shows the update in its own window and answers through window.onUpdateCheck.
+const updateApp = window.MotorcycleManAndroid && window.MotorcycleManAndroid.checkForUpdates ? window.MotorcycleManAndroid : null;
+let checkingApp = 0;
+function showAppUpdate() {
+  document.getElementById('rowAppUpdate').style.display = updateApp ? '' : 'none';
+  if (updateApp && !checkingApp) {
+    document.getElementById('appUpdateSay').textContent = 'This app is ' + updateApp.appVersion() + '. Look for a new version now';
+  }
+}
+function checkAppUpdate() {
+  if (!updateApp || checkingApp) return;
+  const asked = checkingApp = Date.now();
+  document.getElementById('appUpdateSay').textContent = 'Asking your PC and GitHub…';
+  updateApp.checkForUpdates();
+  setTimeout(() => { if (checkingApp === asked) window.onUpdateCheck('No answer. Try again in a moment.'); }, 45000);
+}
+window.onUpdateCheck = words => {
+  checkingApp = 0;
+  document.getElementById('appUpdateSay').textContent = String(words || '');
+};
 function fromPrefs(open) { closePrefs(); open(); }
 function askPrefs(params) {
   const boxes = document.querySelectorAll('[data-pref]');

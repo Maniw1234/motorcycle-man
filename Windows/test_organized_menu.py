@@ -49,6 +49,16 @@ class MenuTests(unittest.TestCase):
         for part in ("THIS PHONE", "ON THE PC", "LOOK", "CONNECTION", "HELP"):
             self.assertIn(f'<div class="send-part">{part}</div>', self.prefs)
 
+    def test_check_for_updates_is_in_settings_in_the_app(self):
+        # It asks the PC and GitHub right away: a phone stayed on 2.8 with 3.0 out on both. Only the app (3.1 and
+        # newer) has checkForUpdates, so a browser or an older app doesn't show the row.
+        this_phone = block(self.prefs, '<div class="send-part">THIS PHONE</div>', '<div class="send-part">ON THE PC</div>')
+        self.assertIn('id="rowAppUpdate" style="display:none" onclick="checkAppUpdate()"', this_phone)
+        for piece in ("window.MotorcycleManAndroid.checkForUpdates ? window.MotorcycleManAndroid : null",
+                      "showTalkBack();\n  showAppUpdate();", "updateApp.checkForUpdates();",
+                      "window.onUpdateCheck = words =>", "No answer. Try again in a moment."):
+            self.assertIn(piece, self.page.replace("\r\n", "\n"))
+
     def test_every_pc_setting_has_a_switch(self):
         self.assertEqual(sorted(re.findall(r'data-pref="(\w+)"', self.prefs)), sorted(app.PHONE_PREFS))
 
