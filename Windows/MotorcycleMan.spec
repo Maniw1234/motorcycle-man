@@ -5,6 +5,10 @@ import os
 # Android\build_apk.ps1, which signs every build with the same key.
 phone_app = os.path.normpath(os.path.join(SPECPATH, '..', 'Android', 'MotorcycleMan.apk'))
 datas = [('motorcycle_man.ico', '.'), ('motorcycle_man_icon.png', '.'), ('motorcycle_man_app_icon.png', '.')]
+# version.json: the build number the GitHub build writes, which the app compares with its releases (app_update.py).
+version_file = os.path.join(SPECPATH, 'version.json')
+if os.path.isfile(version_file):
+    datas.append((version_file, '.'))
 if os.path.isfile(phone_app):
     datas.append((phone_app, '.'))
 else:

@@ -2,9 +2,11 @@
 # Signs with build\debug.keystore so each new build installs as an update over the last one.
 $ErrorActionPreference = "Stop"
 $AndroidDir = $PSScriptRoot
-$Jdk = "$AndroidDir\tools\jdk17"
-$BuildTools = "$AndroidDir\tools\sdk\build-tools\34.0.0"
-$AndroidJar = "$AndroidDir\tools\sdk\platforms\android-34\android.jar"
+# This PC keeps its JDK and SDK in tools\; GitHub's build machine has its own (JAVA_HOME, ANDROID_HOME).
+$Jdk = if (Test-Path "$AndroidDir\tools\jdk17") { "$AndroidDir\tools\jdk17" } else { $env:JAVA_HOME }
+$Sdk = if (Test-Path "$AndroidDir\tools\sdk") { "$AndroidDir\tools\sdk" } else { $env:ANDROID_HOME }
+$BuildTools = "$Sdk\build-tools\34.0.0"
+$AndroidJar = "$Sdk\platforms\android-34\android.jar"
 $BuildDir = "$AndroidDir\build"
 $Keystore = "$BuildDir\debug.keystore"
 $env:JAVA_HOME = $Jdk
@@ -15,7 +17,7 @@ function Invoke-Tool($exe, [string[]]$arguments) {
     if ($LASTEXITCODE -ne 0) { throw "$(Split-Path $exe -Leaf) failed with exit code $LASTEXITCODE" }
 }
 
-Remove-Item "$BuildDir\classes", "$BuildDir\gen", "$BuildDir\classes.dex", "$BuildDir\classes.jar", "$BuildDir\resources.zip", "$BuildDir\*.apk" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item "$BuildDir\classes", "$BuildDir\gen", "$BuildDir\classes.dex", "$BuildDir\classes.jar", "$BuildDir\resources.zip", "$BuildDir\*.apk" -Recurse -Force -ErrorAction SilentlyContinue -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force "$BuildDir\classes", "$BuildDir\gen" | Out-Null
 
 # The launcher icons in res\ come from Icons\make_icons.py.

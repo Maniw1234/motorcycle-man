@@ -28,3 +28,6 @@ Android/tools/
 .env
 keys.json
 *.log
+
+# Written by the GitHub build (the build number the app compares with its releases)
+Windows/version.json

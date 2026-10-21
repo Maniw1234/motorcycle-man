@@ -1,0 +1,87 @@
+# Every push to main builds Motorcycle Man.exe and the Android app and publishes them as a release named
+# "build-<run number>", with SHA256SUMS.txt. Installed copies of Motorcycle Man find it (Windows/app_update.py),
+# offer the update and install it when the user says so; phones then get the Android app from their PC.
+# The Android app is built only when the ANDROID_KEYSTORE_B64 secret holds the signing key (base64), because
+# phones accept an update only when it is signed with the same key as the app they have.
+name: Build and release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.15"
+          allow-prereleases: true
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Android app
+        continue-on-error: true  # without it, the Windows app still comes out (with no Android app inside)
+        shell: pwsh
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          if (-not $env:ANDROID_KEYSTORE_B64) {
+            Write-Host "::warning::No ANDROID_KEYSTORE_B64 secret, so this release has no Android app."
+            exit 0
+          }
+          if (-not (Test-Path "$env:ANDROID_HOME/build-tools/34.0.0") -or -not (Test-Path "$env:ANDROID_HOME/platforms/android-34")) {
+            "y" | & "$env:ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager.bat" "build-tools;34.0.0" "platforms;android-34" | Out-Null
+          }
+          New-Item -ItemType Directory -Force Android/build | Out-Null
+          [IO.File]::WriteAllBytes("Android/build/debug.keystore", [Convert]::FromBase64String($env:ANDROID_KEYSTORE_B64))
+          ./Android/build_apk.ps1
+          Remove-Item Android/build/debug.keystore
+
+      - name: Build number
+        shell: pwsh
+        run: |
+          @{ build = [int]"${{ github.run_number }}"; commit = "${{ github.sha }}" } | ConvertTo-Json | Set-Content -Encoding ascii Windows/version.json
+
+      - name: Windows app
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r Windows/requirements.txt
+          # The UI Automation wrapper comtypes writes on first use; the exe needs it bundled (MotorcycleMan.spec).
+          python -c "import comtypes.client; comtypes.client.GetModule('UIAutomationCore.dll')"
+          Set-Location Windows
+          python -m PyInstaller --noconfirm MotorcycleMan.spec
+
+      - name: Checksums
+        shell: pwsh
+        run: |
+          $files = @("Windows/dist/Motorcycle Man.exe")
+          if (Test-Path Android/MotorcycleMan.apk) { $files += "Android/MotorcycleMan.apk" }
+          $lines = foreach ($file in $files) { "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 $file).Hash.ToLower(), (Split-Path $file -Leaf) }
+          $lines | Set-Content -Encoding ascii SHA256SUMS.txt
+          Get-Content SHA256SUMS.txt
+
+      - name: Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NOTES: ${{ github.event.head_commit.message }}
+        run: |
+          $files = @("Windows/dist/Motorcycle Man.exe", "SHA256SUMS.txt")
+          if (Test-Path Android/MotorcycleMan.apk) { $files += "Android/MotorcycleMan.apk" }
+          $notes = if ($env:NOTES) { $env:NOTES } else { "Built from ${{ github.sha }}." }
+          gh release create "build-${{ github.run_number }}" @files --title "Motorcycle Man build ${{ github.run_number }}" --notes $notes

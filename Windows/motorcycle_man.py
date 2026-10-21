@@ -3,10 +3,15 @@ if __name__ == "__main__" and "--keep-running" in sys.argv:
     # The small watcher that brings Motorcycle Man back after a crash (see keep_running.py), without the rest.
     import keep_running
     sys.exit(keep_running.main(sys.argv))
+if __name__ == "__main__" and "--finish-update" in sys.argv:
+    # A new version taking the old one's place (see app_update.py), without the rest.
+    import app_update
+    sys.exit(app_update.finish_update(sys.argv))
 import array, base64, ctypes, ctypes.wintypes, difflib, html, http.server, io, ipaddress, json, logging.handlers, math, mimetypes, os, queue, random, re, secrets, shutil, socket, struct, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request, warnings, wave, webbrowser, winsound, zipfile
 import xml.etree.ElementTree as ET
 import faulthandler
 import keep_running
+import app_update
 from PIL import Image, ImageChops, ImageGrab, ImageStat
 import helmet_face
 import bike_rider
@@ -988,6 +993,71 @@ def closed_properly():
         os.remove(os.path.join(app_data_dir(), "running"))
     except OSError:
         pass
+
+
+# Updates from GitHub (see app_update): the built app looks for a newer release a minute after it starts and
+# every six hours, says so, and installs it only when the user picks it in the menu by the clock.
+UPDATE = {"release": {}, "busy": False}
+UPDATE_CHECK_EVERY = 6 * 3600
+
+
+def updates_folder() -> str:
+    return os.path.join(app_data_dir(), "updates")
+
+
+def updates_itself() -> bool:
+    # The built Motorcycle Man.exe, not a test copy or the source, unless the user turned checking off.
+    return (bool(getattr(sys, "frozen", False)) and not os.environ.get("MOTORCYCLE_MAN_PORT")
+            and bool(load_settings().get("check_updates", True)))
+
+
+def this_build() -> int:
+    return app_update.own_build(resource_path("version.json"))
+
+
+def check_for_update(bridge) -> dict:
+    release = app_update.latest_release()
+    if app_update.newer(release, this_build()):
+        if release["build"] != UPDATE["release"].get("build"):
+            LOG.info("An update is ready: build %s (this is build %s)", release["build"], this_build())
+            bridge.notice_sig.emit(f"An update is ready (build {release['build']}). Pick \"Install update\" in my menu "
+                                   "by the clock.", 12000)
+        UPDATE["release"] = release
+    return release
+
+
+def update_clock(bridge, stopped=None, first_wait: float = 60):
+    stopped = stopped or threading.Event()
+    if stopped.wait(first_wait):
+        return
+    while True:
+        if updates_itself():
+            try:
+                check_for_update(bridge)
+            except Exception:
+                LOG.warning("Couldn't look for an update", exc_info=True)
+        if stopped.wait(UPDATE_CHECK_EVERY):
+            return
+
+
+def install_update(bridge):
+    # Downloads the new version, checks it, starts it to take this one's place, and closes this one.
+    release = UPDATE["release"]
+    if not release or UPDATE["busy"]:
+        return
+    UPDATE["busy"] = True
+    try:
+        bridge.say_sig.emit("Downloading the update...", 0)
+        path = app_update.download_update(release, updates_folder())
+        app_update.start_install(path, sys.executable, os.getpid())
+        LOG.info("Installing build %s", release["build"])
+        bridge.say_sig.emit("Updating... I'll be right back.", 4000)
+        bridge.update_quit_sig.emit()
+    except (app_update.UpdateError, OSError) as exc:
+        LOG.warning("The update didn't install: %s", exc)
+        bridge.say_sig.emit(f"The update didn't work: {exc}", 8000)
+    finally:
+        UPDATE["busy"] = False
 
 
 def show_notice(text: str, ms: int, overlay, tray):
@@ -5466,6 +5536,7 @@ class Bridge(QObject):
     pointer_sig = Signal(int, int, str, bool)  # where the buddy runs (screen pixels), what it says, whether it takes the mouse
     say_sig = Signal(str, int)
     notice_sig = Signal(str, int)  # news nobody asked for just now (see show_notice): the buddy, or Windows when Quiet
+    update_quit_sig = Signal()  # an update is ready to take this copy's place: close (see install_update)
     act_sig = Signal(str, object)  # the buddy's little show for what it does: "click", "type", "scroll", "done"...
     hide_sig = Signal()
     screen_hide_sig = Signal()
@@ -14357,6 +14428,9 @@ def make_phone_handler(bridge, sw, sh):
 def fill_tray_menu(menu: QMenu, window, bridge, sw: int, sh: int):
     # The menu of Motorcycle Man's icon by the clock, made each time it opens (routines and reminders change).
     menu.clear()
+    if UPDATE["release"]:
+        menu.addAction(f"Install update (build {UPDATE['release']['build']})",
+                       lambda: threading.Thread(target=install_update, args=(bridge,), daemon=True).start())
     menu.addAction("Open Motorcycle Man", lambda: (window.showNormal(), window.raise_(), window.activateWindow()))
     menu.addAction("Talk  (Ctrl+Alt+M)", lambda: threading.Thread(target=listen_and_run, args=(bridge, sw, sh), daemon=True).start())
     routines_menu = menu.addMenu("Routines")
@@ -14409,7 +14483,8 @@ def main():
         return
     app.setWindowIcon(QIcon(resource_path("motorcycle_man.ico")))
     setup_logging()
-    LOG.info("Motorcycle Man started%s", " again after a crash" if "--restarted" in sys.argv else "")
+    LOG.info("Motorcycle Man started%s", " again after a crash" if "--restarted" in sys.argv
+             else f" after updating itself (build {this_build()})" if "--updated" in sys.argv else "")
     watch_for_crashes()
     app.aboutToQuit.connect(closed_properly)
     keep_running_after_a_crash()
@@ -14444,6 +14519,9 @@ def main():
     threading.Thread(target=focus_loop, args=(bridge,), daemon=True).start()
     threading.Thread(target=screen_time_loop, daemon=True).start()
     threading.Thread(target=morning_brief_clock, daemon=True).start()
+    threading.Thread(target=update_clock, args=(bridge,), daemon=True).start()
+    if getattr(sys, "frozen", False):
+        app_update.clean_up(sys.executable, updates_folder())  # what an earlier update left
     watch = pc_health.HealthWatch(health_alert, health_switches, get_known_folder_paths()["Downloads"])
     threading.Thread(target=watch.run, args=(threading.Event(),), daemon=True).start()
     bridge.laser_sig.connect(laser.point)
@@ -14514,6 +14592,9 @@ def main():
     tray, tray_menu = QSystemTrayIcon(app.windowIcon(), app), QMenu()
     ctrl.tray = tray
     bridge.notice_sig.connect(lambda text, ms: show_notice(text, ms, overlay, tray))
+    bridge.update_quit_sig.connect(lambda: (setattr(ctrl, "quitting", True), app.quit()))
+    if "--updated" in sys.argv:
+        bridge.notice_sig.emit(f"I'm updated! This is build {this_build()}.", 6000)
     tray_menu.aboutToShow.connect(lambda: fill_tray_menu(tray_menu, ctrl, bridge, sw, sh))
     tray.setContextMenu(tray_menu)
     tray.setToolTip("Motorcycle Man")

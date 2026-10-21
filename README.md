@@ -75,6 +75,30 @@ platform android-34) in `Android\tools\sdk`, then run `Android\build_apk.ps1` in
 makes a signing key in `Android\build\debug.keystore`. Keep that file private and back it up: phones only
 accept updates signed with the same key.
 
+## Automatic updates
+
+Every push to `main` builds Motorcycle Man.exe and the Android app on GitHub
+([.github/workflows/release.yml](.github/workflows/release.yml)) and publishes them as a release named
+`build-<number>`, with a `SHA256SUMS.txt`. Motorcycle Man.exe looks for a newer release a minute after it
+starts and every six hours. When there is one, Motorcycle Man tells you, and its menu by the clock gets
+**Install update**. Nothing installs until you pick it: then it downloads the new exe, checks it against
+`SHA256SUMS.txt`, closes, and comes back as the new version. Phones get the new Android app from the PC as
+before, when its version number has gone up. A copy you built yourself counts as build 0, so it's offered the
+newest release. To stop looking for updates, set `"check_updates": false` in
+`%APPDATA%\Motorcycle Man\settings.json`. A fork changes `UPDATE_REPO` in `Windows\app_update.py`.
+
+The GitHub build makes the Android app only when the repository has a secret named `ANDROID_KEYSTORE_B64`
+holding your `Android\build\debug.keystore` in base64. It must be the key your phones' app was signed with,
+or they won't accept the update. To add it, copy the key as base64 in PowerShell:
+
+```
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("Android\build\debug.keystore")) | Set-Clipboard
+```
+
+then open the repository's **Settings > Secrets and variables > Actions > New repository secret**, name it
+`ANDROID_KEYSTORE_B64`, paste, and press **Add secret**. Without it, releases still have the exe, but with no
+Android app inside.
+
 ## Privacy
 
 Read [PRIVACY.md](PRIVACY.md). In short: everything runs on your PC, there's no account and no server of

@@ -26,6 +26,10 @@ repository (Security tab), not in a public issue. Include what you found and how
 - **Files from the phone** get safe Windows names and never overwrite anything.
 - **Downloads** of Cloudflare's tunnel program (and ngrok's, if you set one up) are checked for their makers' digital
   signatures.
+- **Updates** come only from this repository's GitHub releases, over HTTPS, are checked against the release's
+  `SHA256SUMS.txt` (so a broken download is never run), and install only when you pick **Install update**.
+  Whoever can push to `main` or publish a release here can ship a new exe to everyone who installs it, so
+  the maintainer's GitHub account should have two-factor sign-in on.
 
 ## Things to know
 

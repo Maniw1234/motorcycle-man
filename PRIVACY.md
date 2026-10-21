@@ -15,6 +15,7 @@ project. Data leaves your devices only for the features below, and only to the s
 | Telegram, Discord, email, WhatsApp/Instagram, Alexa (each off until you link it) | That service | Your messages to the bot, its answers, and screenshots when you ask for them or the guard sends one |
 | Phone alerts on the PC (off until you turn it on) | Your PC only (over your Wi-Fi, or the internet link when it's on) | The phone's notification texts |
 | Text-message commands (off until you turn it on) | Your mobile carrier | The texts and the PC's answers |
+| Updates (Motorcycle Man.exe; `"check_updates": false` in settings.json turns them off) | GitHub | A request for the newest release a minute after it starts and every six hours, and the download when you install one; GitHub sees your IP address, nothing else about you |
 
 **About Gemini's free tier:** Google's terms say that for free (unpaid) use, Google may use what you send,
 and Gemini's answers, to improve its products, and human reviewers may read it. Paid AI services have their
