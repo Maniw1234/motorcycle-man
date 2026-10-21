@@ -21,14 +21,14 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.15"
           allow-prereleases: true
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -69,11 +69,13 @@ jobs:
       - name: Checksums
         shell: pwsh
         run: |
-          $files = @("Windows/dist/Motorcycle Man.exe")
-          if (Test-Path Android/MotorcycleMan.apk) { $files += "Android/MotorcycleMan.apk" }
-          $lines = foreach ($file in $files) { "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 $file).Hash.ToLower(), (Split-Path $file -Leaf) }
-          $lines | Set-Content -Encoding ascii SHA256SUMS.txt
-          Get-Content SHA256SUMS.txt
+          # Release file names have no spaces: GitHub turns them into dots (app_update.py looks for MotorcycleMan.exe).
+          New-Item -ItemType Directory -Force release | Out-Null
+          Copy-Item "Windows/dist/Motorcycle Man.exe" release/MotorcycleMan.exe
+          if (Test-Path Android/MotorcycleMan.apk) { Copy-Item Android/MotorcycleMan.apk release/MotorcycleMan.apk }
+          $lines = foreach ($file in Get-ChildItem -File release) { "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLower(), $file.Name }
+          $lines | Set-Content -Encoding ascii release/SHA256SUMS.txt
+          Get-Content release/SHA256SUMS.txt
 
       - name: Release
         shell: pwsh
@@ -81,7 +83,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           NOTES: ${{ github.event.head_commit.message }}
         run: |
-          $files = @("Windows/dist/Motorcycle Man.exe", "SHA256SUMS.txt")
-          if (Test-Path Android/MotorcycleMan.apk) { $files += "Android/MotorcycleMan.apk" }
+          $files = @(Get-ChildItem -File release | ForEach-Object { $_.FullName })
           $notes = if ($env:NOTES) { $env:NOTES } else { "Built from ${{ github.sha }}." }
           gh release create "build-${{ github.run_number }}" @files --title "Motorcycle Man build ${{ github.run_number }}" --notes $notes

@@ -17,7 +17,8 @@ import urllib.request
 import keep_running
 
 UPDATE_REPO = "Maniw1234/motorcycle-man"  # a fork changes this to its own repository
-EXE_ASSET, SUMS_ASSET = "Motorcycle Man.exe", "SHA256SUMS.txt"
+# Release file names have no spaces: GitHub turns them into dots ("Motorcycle.Man.exe").
+EXE_ASSET, SUMS_ASSET = "MotorcycleMan.exe", "SHA256SUMS.txt"
 DOWNLOAD_LIMIT = 400 << 20  # bytes: the exe is about 70 MB, so a far bigger download is stopped
 USER_AGENT = "MotorcycleMan-updater"
 
@@ -79,7 +80,7 @@ def download_update(release: dict, folder: str, opener=None, progress=lambda don
     expected = next((line.split()[0].lower() for line in sums.splitlines()
                      if line.strip().endswith(EXE_ASSET) and len(line.split()[0]) == 64), "")
     if not expected:
-        raise UpdateError("The update has no checksum for Motorcycle Man.exe.")
+        raise UpdateError(f"The update has no checksum for {EXE_ASSET}.")
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, f"Motorcycle Man build {release['build']}.exe")
     partial, digest, done = path + ".part", hashlib.sha256(), 0

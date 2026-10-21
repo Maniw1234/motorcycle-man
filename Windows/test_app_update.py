@@ -18,8 +18,8 @@ import motorcycle_man as app
 QT = QApplication.instance() or QApplication([])
 NEW_EXE = b"MZ the new Motorcycle Man"
 RELEASE_JSON = {"tag_name": "build-42", "draft": False, "prerelease": False, "body": "A faster screen view",
-                "assets": [{"name": "Motorcycle Man.exe", "size": len(NEW_EXE),
-                            "browser_download_url": "https://github.com/Maniw1234/motorcycle-man/releases/download/build-42/Motorcycle.Man.exe"},
+                "assets": [{"name": "MotorcycleMan.exe", "size": len(NEW_EXE),
+                            "browser_download_url": "https://github.com/Maniw1234/motorcycle-man/releases/download/build-42/MotorcycleMan.exe"},
                            {"name": "SHA256SUMS.txt", "size": 100,
                             "browser_download_url": "https://github.com/Maniw1234/motorcycle-man/releases/download/build-42/SHA256SUMS.txt"},
                            {"name": "MotorcycleMan.apk", "size": 5,
@@ -46,7 +46,7 @@ def web(files):
 
 
 def sums(body=NEW_EXE):
-    return f"{hashlib.sha256(body).hexdigest()}  Motorcycle Man.exe\n{'0' * 64}  MotorcycleMan.apk\n".encode()
+    return f"{hashlib.sha256(body).hexdigest()}  MotorcycleMan.exe\n{'0' * 64}  MotorcycleMan.apk\n".encode()
 
 
 class ReleaseTests(unittest.TestCase):
@@ -57,6 +57,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertFalse(app_update.newer(release, 42))
         self.assertTrue(app_update.newer(release, 0))  # a copy made on a PC
         self.assertFalse(app_update.newer({}, 0))
+        self.assertNotIn(" ", app_update.EXE_ASSET)  # GitHub turns spaces in release file names into dots
 
     def test_releases_that_dont_count(self):
         for change in ({"draft": True}, {"prerelease": True}, {"tag_name": "v1.0"}, {"assets": RELEASE_JSON["assets"][1:]}):
@@ -81,14 +82,14 @@ class DownloadTests(unittest.TestCase):
         self.release = app_update.latest_release(opener=web({"/releases/latest": json.dumps(RELEASE_JSON).encode()}))
 
     def test_a_checked_download(self):
-        path = app_update.download_update(self.release, self.folder, web({"Motorcycle.Man.exe": NEW_EXE, "SHA256SUMS.txt": sums()}))
+        path = app_update.download_update(self.release, self.folder, web({"MotorcycleMan.exe": NEW_EXE, "SHA256SUMS.txt": sums()}))
         with open(path, "rb") as f:
             self.assertEqual(f.read(), NEW_EXE)
         self.assertEqual(os.path.basename(path), "Motorcycle Man build 42.exe")
 
     def test_a_download_that_doesnt_match_is_thrown_away(self):
         with self.assertRaises(app_update.UpdateError) as said:
-            app_update.download_update(self.release, self.folder, web({"Motorcycle.Man.exe": b"MZ something else",
+            app_update.download_update(self.release, self.folder, web({"MotorcycleMan.exe": b"MZ something else",
                                                                        "SHA256SUMS.txt": sums()}))
         self.assertIn("didn't match", str(said.exception))
         self.assertEqual(os.listdir(self.folder), [])  # nothing left behind
@@ -101,7 +102,7 @@ class DownloadTests(unittest.TestCase):
     def test_too_big_is_stopped(self):
         with mock.patch.object(app_update, "DOWNLOAD_LIMIT", 10):
             with self.assertRaises(app_update.UpdateError) as said:
-                app_update.download_update(self.release, self.folder, web({"Motorcycle.Man.exe": NEW_EXE, "SHA256SUMS.txt": sums()}))
+                app_update.download_update(self.release, self.folder, web({"MotorcycleMan.exe": NEW_EXE, "SHA256SUMS.txt": sums()}))
         self.assertIn("bigger", str(said.exception))
 
 
