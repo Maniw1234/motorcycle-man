@@ -1,0 +1,102 @@
+# A new version is released by pushing its tag ("v1.0", "v1.1"...; the tag's message becomes the release notes).
+# GitHub then builds Motorcycle Man.exe and the Android app and publishes them as the release "Motorcycle Man 1.0",
+# with SHA256SUMS.txt. Installed copies of Motorcycle Man find it (Windows/app_update.py), offer the update and
+# install it when the user says so. Phones get the Android app from their PC, or from here: phone-app.json says its
+# version, size and SHA-256 (Android/src/.../AppUpdate.java reads it). Ordinary pushes release nothing.
+# The Android app is built only when the ANDROID_KEYSTORE_B64 secret holds the signing key (base64), because
+# phones accept an update only when it is signed with the same key as the app they have.
+name: Build and release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.15"
+          allow-prereleases: true
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Android app
+        continue-on-error: true  # without it, the Windows app still comes out (with no Android app inside)
+        shell: pwsh
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          if (-not $env:ANDROID_KEYSTORE_B64) {
+            Write-Host "::warning::No ANDROID_KEYSTORE_B64 secret, so this release has no Android app."
+            exit 0
+          }
+          if (-not (Test-Path "$env:ANDROID_HOME/build-tools/34.0.0") -or -not (Test-Path "$env:ANDROID_HOME/platforms/android-34")) {
+            "y" | & "$env:ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager.bat" "build-tools;34.0.0" "platforms;android-34" | Out-Null
+          }
+          New-Item -ItemType Directory -Force Android/build | Out-Null
+          [IO.File]::WriteAllBytes("Android/build/debug.keystore", [Convert]::FromBase64String($env:ANDROID_KEYSTORE_B64))
+          ./Android/build_apk.ps1
+          Remove-Item Android/build/debug.keystore
+
+      - name: Version
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          @{ version = $version; commit = "${{ github.sha }}" } | ConvertTo-Json | Set-Content -Encoding ascii Windows/version.json
+          Get-Content Windows/version.json
+
+      - name: Windows app
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r Windows/requirements.txt
+          # The UI Automation wrapper comtypes writes on first use; the exe needs it bundled (MotorcycleMan.spec).
+          python -c "import comtypes.client; comtypes.client.GetModule('UIAutomationCore.dll')"
+          Set-Location Windows
+          python -m PyInstaller --noconfirm MotorcycleMan.spec
+
+      - name: Checksums
+        shell: pwsh
+        run: |
+          # Release file names have no spaces: GitHub turns them into dots (app_update.py looks for MotorcycleMan.exe).
+          New-Item -ItemType Directory -Force release | Out-Null
+          Copy-Item "Windows/dist/Motorcycle Man.exe" release/MotorcycleMan.exe
+          if (Test-Path Android/MotorcycleMan.apk) { Copy-Item Android/MotorcycleMan.apk release/MotorcycleMan.apk }
+          $lines = foreach ($file in Get-ChildItem -File release) { "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLower(), $file.Name }
+          $lines | Set-Content -Encoding ascii release/SHA256SUMS.txt
+          Get-Content release/SHA256SUMS.txt
+          if (Test-Path release/MotorcycleMan.apk) {
+            $manifest = Get-Content -Raw Android/AndroidManifest.xml
+            $apk = Get-Item release/MotorcycleMan.apk
+            [ordered]@{
+              versionCode = [int][regex]::Match($manifest, 'android:versionCode="(\d+)"').Groups[1].Value
+              versionName = [regex]::Match($manifest, 'android:versionName="([^"]+)"').Groups[1].Value
+              size = $apk.Length
+              sha256 = (Get-FileHash -Algorithm SHA256 $apk.FullName).Hash.ToLower()
+              url = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/MotorcycleMan.apk"
+            } | ConvertTo-Json | Set-Content -Encoding ascii release/phone-app.json
+            Get-Content release/phone-app.json
+          }
+
+      - name: Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $files = @(Get-ChildItem -File release | ForEach-Object { $_.FullName })
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          gh release create "${{ github.ref_name }}" @files --verify-tag --title "Motorcycle Man $version" --notes-from-tag

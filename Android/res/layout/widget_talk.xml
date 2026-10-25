@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The home-screen widget (see TalkWidget): the helmet, then Talk, PC screen and Remote. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/widget_bg"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:padding="6dp">
+
+    <ImageView
+        android:id="@+id/widget_helmet"
+        android:layout_width="44dp"
+        android:layout_height="44dp"
+        android:contentDescription="Open Motorcycle Man"
+        android:scaleType="fitCenter"
+        android:src="@mipmap/ic_launcher" />
+
+    <TextView
+        android:id="@+id/widget_talk"
+        android:layout_width="0dp"
+        android:layout_height="40dp"
+        android:layout_marginStart="6dp"
+        android:layout_weight="1.3"
+        android:background="@drawable/widget_button_sun"
+        android:gravity="center"
+        android:text="Talk"
+        android:textColor="#1A1305"
+        android:textSize="14sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/widget_screen"
+        android:layout_width="0dp"
+        android:layout_height="40dp"
+        android:layout_marginStart="6dp"
+        android:layout_weight="1"
+        android:background="@drawable/widget_button"
+        android:gravity="center"
+        android:text="Screen"
+        android:textColor="#E2E8F0"
+        android:textSize="13sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/widget_remote"
+        android:layout_width="0dp"
+        android:layout_height="40dp"
+        android:layout_marginStart="6dp"
+        android:layout_weight="1"
+        android:background="@drawable/widget_button"
+        android:gravity="center"
+        android:text="Remote"
+        android:textColor="#E2E8F0"
+        android:textSize="13sp"
+        android:textStyle="bold" />
+</LinearLayout>

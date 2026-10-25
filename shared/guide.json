@@ -1,0 +1,397 @@
+{
+  "about": "The welcome tour (5 slides on the PC, 5 on the phone) and the feature guide, shared by Motorcycle Man.exe (Windows/guide.py) and the Android app (Guide.java). Edit the words here; both apps read this file.",
+  "tour": {
+    "pc": [
+      {
+        "icon": "👋",
+        "title": "Hi, I'm Motorcycle Man!",
+        "text": "I ride around your mouse and do things on this PC when you ask: open apps, click, type, find files, look things up. First, pick your AI in my AI row. Gemini is free, and you use your own key."
+      },
+      {
+        "icon": "📱",
+        "title": "Your phone is my remote",
+        "text": "Open the Motorcycle Man app on your phone and it finds this PC on your Wi-Fi, or scan my QR code with any phone. Away from home? Turn on the internet link. Telegram, Discord, email and more are in the Connect row."
+      },
+      {
+        "icon": "🎙️",
+        "title": "Just ask, in your own words",
+        "text": "Talk or type on the phone, press Ctrl+Alt+M, say \"Hey Motorcycle Man\", or use the Try a command box. \"Open Gmail\", \"pause the music\", \"research the best laptops\". I ask before I send or delete anything."
+      },
+      {
+        "icon": "🖥️",
+        "title": "Your PC in your pocket",
+        "text": "From the phone: see the screen live, use it like a touchpad and keyboard, run slides, play games, switch windows, change music and volume, send files both ways and share the clipboard. Your phone's messages show up here too."
+      },
+      {
+        "icon": "⏰",
+        "title": "Little helpers",
+        "text": "Reminders, routines, a morning brief, PC health alerts, power timers, focus mode, screen time, shared lists and a guard for when you're away. I wait by the clock: right-click my icon for the menu, or open the Guide any time."
+      }
+    ],
+    "phone": [
+      {
+        "icon": "👋",
+        "title": "Meet Motorcycle Man",
+        "text": "This app is the remote for Motorcycle Man, a little rider who lives on your Windows PC and does what you ask. Install Motorcycle Man on your PC and open it, then come back here."
+      },
+      {
+        "icon": "🔗",
+        "title": "Connect once",
+        "text": "On the same Wi-Fi, the app finds your PC by itself: press Allow on the PC, or type the PC's 6-digit code. It remembers your PC. Away from home, use the internet link; with no Wi-Fi, Bluetooth works too."
+      },
+      {
+        "icon": "🎙️",
+        "title": "Hold the helmet and talk",
+        "text": "Say what you want, or type it: \"open Gmail\", \"pause the music\", \"find my resume\". The home-screen widget, the quick-settings tile, the share sheet and your watch can ask too."
+      },
+      {
+        "icon": "🖥️",
+        "title": "Your PC in your pocket",
+        "text": "The menu has everything in sections: use the PC (its screen, a touchpad, remote, windows, slides, game pad), files and music, your day (reminders, routines, lists), and the PC's health and power."
+      },
+      {
+        "icon": "🔔",
+        "title": "Phone and PC together",
+        "text": "See your phone's messages on the PC and answer from there, make your phone ring when it's lost, and send texts to it as commands. Every switch is in Settings, and Guide explains everything."
+      }
+    ]
+  },
+  "features": [
+    {
+      "icon": "🗣️",
+      "title": "Commands",
+      "where": "Phone, PC, chat apps",
+      "what": "Tell Motorcycle Man what to do in your own words, by voice or typing: open apps and websites, click and type, scroll, play music, write an email, find a file, and much more.",
+      "use": [
+        "Phone: hold the helmet and speak, or type in the box and press send.",
+        "PC: press Ctrl+Alt+M, say \"Hey Motorcycle Man\" (turn on Wake word), or type in the Try a command box.",
+        "Say \"stop\" to stop a task, or tap Stop on the phone."
+      ],
+      "how": "Simple commands (open an app, volume, music keys) run straight away on the PC. Anything that needs to look at the screen sends a screenshot and a list of the controls on screen to your AI, which answers with the next clicks and keys, step by step, until the task is done.",
+      "needs": "An AI with your own key, in the window's AI row."
+    },
+    {
+      "icon": "🤖",
+      "title": "Your AI",
+      "where": "PC window: AI row",
+      "what": "Pick the AI that understands you: Google Gemini (free), Anthropic Claude, OpenAI's ChatGPT, or any OpenAI-compatible service (OpenRouter, Groq, Mistral, DeepSeek, xAI), or a model on your PC through Ollama or LM Studio.",
+      "use": [
+        "In the PC window, press the button in the AI row.",
+        "Choose the AI, paste your key, press Check, then Save."
+      ],
+      "how": "Each user brings their own key; none come with Motorcycle Man. Keys stay in a file on your PC and are only sent to the AI you chose. With Ollama or LM Studio, nothing leaves your PC.",
+      "needs": "A key from the AI's website (Gemini's is free)."
+    },
+    {
+      "icon": "✅",
+      "title": "Safe actions",
+      "where": "Phone and PC",
+      "what": "Before sending, deleting, buying or anything like it, Motorcycle Man stops and asks you.",
+      "use": [
+        "When asked, tap Yes or No on the phone, or answer in the window on the PC.",
+        "In chat apps, reply YES or NO."
+      ],
+      "how": "Risky steps the AI suggests are held back until you say yes. Text on the screen can't approve anything by itself."
+    },
+    {
+      "icon": "🔬",
+      "title": "Research",
+      "where": "Phone and PC",
+      "what": "Ask a question and get a research card: a one-line answer, a short summary, and a full report with its sources.",
+      "use": [
+        "Say \"research the best budget laptops\" or \"look up how to repot a cactus\".",
+        "The card shows in the corner of the PC and in History on the phone. Say \"open the second source\" to open one."
+      ],
+      "how": "Motorcycle Man searches Bing, reads the top public web pages, and asks your AI to write the card with links to where each fact came from."
+    },
+    {
+      "icon": "📲",
+      "title": "Connecting your phone",
+      "where": "Android app, any phone browser",
+      "what": "Your phone joins the PC with a secret link, over your home Wi-Fi.",
+      "use": [
+        "Android app: open it on the same Wi-Fi; it finds the PC. Press Allow on the PC, or type the PC's 6-digit code on the phone.",
+        "Any phone: scan the QR code in the PC window, or type the address shown there into a browser.",
+        "Several PCs? Menu > Settings > Switch PC."
+      ],
+      "how": "The PC runs a small web server. Every request from the phone carries a random secret that only phones you approved get. Without it, the PC shows nothing but the page for connecting."
+    },
+    {
+      "icon": "🌍",
+      "title": "Internet link",
+      "where": "PC window: Connect your phone",
+      "what": "Use Motorcycle Man when you're away from home, over mobile data or any Wi-Fi.",
+      "use": [
+        "In the PC window, press Turn on beside \"Away from home\".",
+        "Your phone switches to it by itself. Turn it off when you don't need it."
+      ],
+      "how": "It opens a free, encrypted Cloudflare tunnel to your PC (or a fixed address with a free ngrok account). Requests still need your phone's secret."
+    },
+    {
+      "icon": "🔵",
+      "title": "Bluetooth link",
+      "where": "Android app, PC",
+      "what": "Connect the phone to the PC with no Wi-Fi at all.",
+      "use": [
+        "Pair the phone and PC in Bluetooth settings first.",
+        "In the app's first screen, tap Bluetooth and pick your PC."
+      ],
+      "how": "The app carries the phone page over one Bluetooth connection. The PC treats those requests like any other phone's, never as the PC itself."
+    },
+    {
+      "icon": "💬",
+      "title": "Chat apps and other ways in",
+      "where": "PC window: Connect row",
+      "what": "Send commands from Telegram, Discord, email, WhatsApp, Instagram, Alexa, Siri Shortcuts, or text messages to your Android phone. Guests can have their own limited access.",
+      "use": [
+        "In the PC window, press Connect, then follow the steps for the one you want.",
+        "Each one links to you with a one-time code, so only you can use it.",
+        "Texts: Menu > Settings > Text commands, and set a PIN; then text \"MM <PIN> <command>\" to the phone."
+      ],
+      "how": "Each service passes your message to the PC, which runs it like a command from the phone and sends back the answer (and screenshots when you ask). Guests' risky requests wait for you.",
+      "needs": "Each service's own free bot or account; WhatsApp, Instagram and Alexa need a free ngrok address."
+    },
+    {
+      "icon": "🖥️",
+      "title": "PC screen",
+      "where": "Phone menu: PC screen",
+      "what": "See the PC's screen live on your phone and use it: tap to click, pinch to zoom, hear the PC's sound, take a screenshot.",
+      "use": [
+        "Menu > PC screen. Tap to click; long-press, then move to drag.",
+        "Pinch to zoom for a sharp close-up. Pick Smooth, Sharp or Data saver.",
+        "Use the speaker button for sound, the keyboard button to type, the camera button for a screenshot."
+      ],
+      "how": "The PC grabs only what changed on screen (Windows' Desktop Duplication) and sends it as pictures, up to about 25 a second. The pointer is drawn by the phone so it moves smoothly."
+    },
+    {
+      "icon": "👆",
+      "title": "Touchpad and keyboard",
+      "where": "Phone menu: Touchpad",
+      "what": "Use your phone as the PC's mouse and keyboard.",
+      "use": [
+        "Menu > Touchpad. One finger moves the mouse; tap to click; tap, then hold to drag.",
+        "Two fingers scroll, or tap for a right-click.",
+        "Type in the box: it goes straight into the PC."
+      ],
+      "how": "Every move is sent to the PC at once over a connection that stays open, and the PC moves its mouse and presses its keys."
+    },
+    {
+      "icon": "📽️",
+      "title": "Slides remote",
+      "where": "Phone menu: Slides",
+      "what": "Run a presentation from your phone, with a laser pointer.",
+      "use": [
+        "Menu > Slides. Tap Next or Back.",
+        "Hold in the box to show a red laser dot on the PC's screen."
+      ],
+      "how": "The buttons press the arrow keys on the PC, and the dot is a small window drawn on top of everything."
+    },
+    {
+      "icon": "🎮",
+      "title": "Game pad",
+      "where": "Phone menu: Game pad",
+      "what": "Play PC games with your phone as a controller.",
+      "use": [
+        "Menu > Game pad, then hold the buttons."
+      ],
+      "how": "Buttons hold down keyboard keys on the PC while you press them, and let go by themselves if the connection goes quiet."
+    },
+    {
+      "icon": "🎛️",
+      "title": "Remote, music and quick settings",
+      "where": "Phone menu: Remote, Music, Quick settings",
+      "what": "Volume, brightness, play/pause, lock and sleep; what's playing and the volume of each app; dark mode, warm screen, Wi-Fi, Bluetooth and Do not disturb.",
+      "use": [
+        "Menu > Remote for the media keys, brightness, lock and sleep.",
+        "Menu > Music for what's playing and a volume slider for each app.",
+        "Menu > Quick settings for dark mode, night light, Do not disturb, Wi-Fi, Bluetooth and the guard."
+      ],
+      "how": "Motorcycle Man uses Windows' own media, sound mixer and settings, the same ones as the taskbar."
+    },
+    {
+      "icon": "🪟",
+      "title": "Open windows",
+      "where": "Phone menu: Windows",
+      "what": "See the PC's open windows with their icons, and bring one to the front, minimize, maximize or close it.",
+      "use": [
+        "Menu > Windows, then tap a window."
+      ],
+      "how": "The list is the same as the taskbar's."
+    },
+    {
+      "icon": "📁",
+      "title": "Files",
+      "where": "Phone menu: Files, Find, Send",
+      "what": "Send files both ways, browse the PC's folders, and find a file by name.",
+      "use": [
+        "Menu > Send: text or a link for the PC's clipboard (or to open on the PC), and files both ways.",
+        "Menu > Files: open folders, save a file to the phone, or put phone files in the folder shown.",
+        "Menu > Find: search by name or say \"find my resume\".",
+        "On the PC: right-click a file > Send to > Motorcycle Man."
+      ],
+      "how": "Files travel straight between the phone and PC over your link. Find uses Windows' search index, so it's quick. Files from the phone never overwrite anything."
+    },
+    {
+      "icon": "📋",
+      "title": "Clipboard and screen text",
+      "where": "Phone and PC",
+      "what": "Copy on one, paste on the other. And grab the words on the PC's screen.",
+      "use": [
+        "Copy something on the PC: it's ready on the phone. Copy on the phone, then open the app: it's on the PC.",
+        "Say \"copy the text on the screen\" or \"read the screen\".",
+        "Turn clipboard sync off in Menu > Settings."
+      ],
+      "how": "Clipboard changes go across your link (password managers' private copies are skipped). Screen text is read on the PC by Windows' built-in text recognition; nothing goes online."
+    },
+    {
+      "icon": "🔔",
+      "title": "Phone alerts on the PC",
+      "where": "Phone: Menu > Settings",
+      "what": "Your phone's notifications pop up on the PC, and you can reply to messages from there.",
+      "use": [
+        "Menu > Settings > Phone alerts on the PC, then allow notification access.",
+        "Messages show in the corner of the PC; type a reply and send."
+      ],
+      "how": "Android shares notifications with the app, which passes them to the PC you turned this on for, and sends your reply through the notification's own reply box.",
+      "needs": "The Android app."
+    },
+    {
+      "icon": "📳",
+      "title": "Find my phone and battery",
+      "where": "PC tray menu, any command",
+      "what": "Make the phone ring loudly, even on silent, and see its battery on the PC.",
+      "use": [
+        "Right-click the icon by the clock > Find my phone, or say \"find my phone\".",
+        "The phone's battery is in the icon's tooltip; low battery gets a warning."
+      ],
+      "how": "The app rings at alarm volume for 30 seconds. The battery comes along with the phone's regular check-ins.",
+      "needs": "The Android app."
+    },
+    {
+      "icon": "⌚",
+      "title": "Widget, tile, share and watch",
+      "where": "Android",
+      "what": "Ask Motorcycle Man without opening the app.",
+      "use": [
+        "Add the Motorcycle Man widget to the home screen, or the Talk to PC tile to quick settings.",
+        "Share text, links or files to Motorcycle Man from any app.",
+        "Menu > Settings > Watch: a notification your watch shows, with a button to talk."
+      ],
+      "how": "Each one opens the app straight to listening, or sends what you shared to the PC."
+    },
+    {
+      "icon": "⏰",
+      "title": "Reminders and routines",
+      "where": "Phone menu: Reminders, Routines; PC tray menu",
+      "what": "Reminders at a time, and routines that run several steps with one word.",
+      "use": [
+        "Say \"remind me at 5 to call mom\" or \"remind me in 20 minutes to stretch\".",
+        "Menu > Routines: make one (like \"work mode\": open email, calendar, music) and run it from the phone or the tray menu.",
+        "Stickers (PC window > Connect): a routine as a QR code to print or a link for an NFC tag, run with one tap."
+      ],
+      "how": "Reminders are kept on the PC; it speaks them, shows them and tells the phone. Routines run their steps as commands, one after another."
+    },
+    {
+      "icon": "☀️",
+      "title": "Morning brief",
+      "where": "Phone menu: Brief",
+      "what": "A short daily summary: the weather where you live, today's reminders and routines, and a word about the PC.",
+      "use": [
+        "Say \"set my city to <town>\" once.",
+        "Menu > Brief, or say \"good morning\" or \"what's my day like\". It can also come by itself in the morning (Menu > Settings > Morning brief)."
+      ],
+      "how": "Weather comes from Open-Meteo (free, no account) for the town you set; the rest is from your PC."
+    },
+    {
+      "icon": "🩺",
+      "title": "PC health and power",
+      "where": "Phone menu: Health, Power",
+      "what": "The PC's battery, processor, memory and storage, with warnings when the battery runs low or the disk is nearly full; shut down, restart, sleep or lock on a timer; and wake the PC from the phone.",
+      "use": [
+        "Menu > Health for how the PC is doing.",
+        "Menu > Power to set a timer, or \"shut down in 30 minutes\".",
+        "Wake: open the app once on your home Wi-Fi so it learns the PC, then Power > Wake."
+      ],
+      "how": "The PC checks itself every few minutes and warns you. Waking uses Wake-on-LAN, a special packet the PC's network card listens for while it sleeps."
+    },
+    {
+      "icon": "🎯",
+      "title": "Focus mode and screen time",
+      "where": "Phone menu: Focus, Screen time",
+      "what": "A focus timer that keeps distractions away, and how long you used each app today.",
+      "use": [
+        "Menu > Focus, pick 15, 25, 45 or 60 minutes, and tap Start focus. With \"Keep YouTube and the like away\" on, distracting windows are minimized while it runs.",
+        "Menu > Screen time for today's apps."
+      ],
+      "how": "Screen time notes the app in front every few seconds, on the PC only."
+    },
+    {
+      "icon": "📝",
+      "title": "Shared lists",
+      "where": "Phone menu: Lists",
+      "what": "Shopping lists, to-dos and more, the same on the phone and PC.",
+      "use": [
+        "Menu > Lists, or say \"add milk to my shopping list\"."
+      ],
+      "how": "Lists are kept on the PC, so every phone and chat app linked to it sees the same ones."
+    },
+    {
+      "icon": "🛡️",
+      "title": "Guard",
+      "where": "PC tray menu, phone Quick settings",
+      "what": "Tells you if someone uses your PC while you're away, and can lock it.",
+      "use": [
+        "Right-click the icon by the clock > Guard my PC while I'm away, or Menu > Quick settings > Guard, or say \"guard my PC\".",
+        "Turn it off when you're back."
+      ],
+      "how": "The first key press or mouse move that isn't Motorcycle Man's own sends you an alert with a screenshot (and locks the PC if you chose that)."
+    },
+    {
+      "icon": "🏍️",
+      "title": "The buddy",
+      "where": "PC",
+      "what": "A cute rider by your mouse with a helmet face that shows how it feels, engine sounds, tricks and paint jobs.",
+      "use": [
+        "Click the helmet in the window, or Menu > Settings > Paint job.",
+        "Turn Engine, Voice, Quiet and Start with Windows on or off in the window, or from the phone in Menu > Settings.",
+        "Quiet: the buddy only comes out for your commands; other news is a Windows notification."
+      ],
+      "how": "The buddy is kept out of screenshots, so it never gets in the AI's way."
+    },
+    {
+      "icon": "⚙️",
+      "title": "Settings",
+      "where": "Phone menu: Settings (or the gear at the top)",
+      "what": "Every switch in one place: this phone's, the PC's, the paint job, other PCs and help.",
+      "use": [
+        "Open the menu and tap Settings, or the gear at the top.",
+        "This phone: spoken replies, phone alerts on the PC, watch, full screen, text commands and Check for updates.",
+        "On the PC: voice, engine sounds, Quiet, \"Hey Motorcycle Man\", morning brief, clipboard sync, start with Windows and updates."
+      ],
+      "how": "The PC's switches are kept on the PC, so every phone and the PC window show the same ones."
+    },
+    {
+      "icon": "🔄",
+      "title": "Updates",
+      "where": "PC and phone",
+      "what": "New versions arrive by themselves, and nothing installs until you say so.",
+      "use": [
+        "PC: when Motorcycle Man says an update is ready, right-click the icon by the clock > Install update.",
+        "Phone: when the app offers an update, tap Update, then OK on Android's question. To look right away, tap Check for updates in Menu > Settings.",
+        "Don't want them? Turn off Look for updates in Menu > Settings."
+      ],
+      "how": "Every change to Motorcycle Man is built on GitHub. Downloads are checked against their published fingerprints, and Android installs the phone app only when it's signed with the same key."
+    },
+    {
+      "icon": "🔒",
+      "title": "Privacy and safety",
+      "where": "Everywhere",
+      "what": "Everything runs on your PC. There's no account and no server of ours.",
+      "use": [
+        "Treat your phone link like a password and only approve phones you own.",
+        "Don't run screen commands while private things are showing: screenshots go to your AI."
+      ],
+      "how": "Read PRIVACY.md and SECURITY.md on GitHub for exactly what goes where."
+    }
+  ]
+}

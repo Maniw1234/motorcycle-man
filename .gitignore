@@ -1,0 +1,33 @@
+# Build output (rebuild with: pyinstaller MotorcycleMan.spec)
+Windows/build/
+Windows/dist/
+Android/build/
+*.apk
+*.idsig
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Android toolchain (downloaded JDK + SDK, ~1 GB)
+Android/tools/
+
+# IDE settings
+.idea/
+*.iml
+
+# Manual backups made before git (kept on disk, not tracked)
+*.before-*.py
+*.pre-*.py
+
+# Secrets and local data (never commit these)
+*.keystore
+*.jks
+*.p12
+*.pem
+.env
+keys.json
+*.log
+
+# Written by the GitHub build (the version the app compares with its releases)
+Windows/version.json
