@@ -1,6 +1,7 @@
 package app.motorcycleman.remote;
 
 import android.Manifest;
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
@@ -12,22 +13,29 @@ import android.bluetooth.BluetoothManager;
 import android.content.ClipData;
 import android.content.ClipDescription;
 import android.content.ClipboardManager;
+import android.content.ComponentName;
+import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageInstaller;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
+import android.media.AudioAttributes;
+import android.media.AudioFocusRequest;
+import android.media.AudioManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
@@ -35,8 +43,11 @@ import android.speech.SpeechRecognizer;
 import android.speech.tts.TextToSpeech;
 import android.text.InputFilter;
 import android.text.InputType;
+import android.util.Log;
+import android.view.HapticFeedbackConstants;
 import android.view.KeyEvent;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
@@ -72,6 +83,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.security.SecureRandom;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 // Shows Motorcycle Man's phone page full screen. The app finds Motorcycle Man on the Wi-Fi by itself and asks the PC to
@@ -87,6 +99,10 @@ public class MainActivity extends Activity {
     // "remote" (EXTRA_DO), or a command to ask Motorcycle Man (EXTRA_ASK).
     static final String EXTRA_DO = "app.motorcycleman.remote.DO";
     static final String EXTRA_ASK = "app.motorcycleman.remote.ASK";
+    // Beside them, this install's own random key: Android lets any app open MainActivity, so without the key
+    // another app could have Motorcycle Man listen, or send the PC a command, with no tap from the user.
+    static final String EXTRA_FROM_APP = "app.motorcycleman.remote.FROM_APP";
+    private static final String KEY_INSIDE = "inside_key";
     private static final String KEY_URL = "phone_url";
     private static final String KEY_PCS = "pcs";  // every PC this phone has used, newest first: [{"name", "url", "mac", "broadcast"}]
     private static final int MOST_PCS = 8;
@@ -101,6 +117,21 @@ public class MainActivity extends Activity {
     private static final String NOT_FOUND = "Couldn't find Motorcycle Man on this Wi-Fi. Open Motorcycle Man on your PC and make sure "
             + "the phone is on the same Wi-Fi; this keeps looking. Or paste the link from the Motorcycle Man window below.";
     private static final String ALLOW_MICROPHONE = "Allow Motorcycle Man to use the microphone, then hold the helmet again.";
+    private static final int ASK_MICROPHONE = 1;
+    // Holding the helmet (pages for app 1.1 and newer): one press, from the finger going down to one final answer.
+    private static final String TAG = "MMSpeech";  // Android's log: what the listening did and how long it took, never what was said
+    // How often a speech service refused one long session, or the app's own recording (see SpeechTurn.afterRefusal).
+    private static final String KEY_SEGMENTED = "speech_segmented";
+    private static final String KEY_OWN_MIC = "speech_own_mic";
+    private static final long OWN_MIC_READY_MS = 1500;  // with the app's own recording, the service should be ready by then
+    private static final long HOLD_MS = 120000;  // the longest hold, as on the page and the PC
+    private static final long TAP_MS = 30000;  // the longest tap
+    private static final long FINAL_WORDS_MS = 2500;  // after let-go, the recognizer has this long to give its last words
+    private static final long READY_MS = 3000;  // the microphone should open by then; if not, a fresh recognizer tries
+    private static final long LEVEL_EVERY_MS = 125;  // the voice's loudness goes to the page at most 8 times a second
+    private static final int MOST_HINTS = 50;  // names the page asks the recognizer to expect (Android 13 and newer)
+    private static final String STUCK = "My ears on this phone stopped. Let go and try again.";
+    private static final String STUCK_TAP = "My ears on this phone stopped. Tap me and try again.";
 
     private WebView web;
     private ScrollView setup;
@@ -112,7 +143,28 @@ public class MainActivity extends Activity {
     private LinearLayout choices;
     private Button findButton;
     private EditText urlInput;
-    private SpeechRecognizer recognizer;
+    private SpeechRecognizer recognizer;  // for pages from before app 1.1 (startListening), as it always was
+    private SpeechRecognizer talkRecognizer;  // this press's own recognizer: a fresh one for every press
+    private final SpeechTurn turn = new SpeechTurn();  // this press's words, and what comes after each pause
+    private String talkKey = "";  // the page's name for this press ("a1b2c3d4-7"); every answer carries it
+    private int talkMode = SpeechTurn.OFF;
+    private String talkLanguage = "en-US";
+    private ArrayList<String> talkHints = new ArrayList<>();
+    private boolean talkSegmented;  // one long session that reports each pause's words (Android 13 and newer)
+    private OwnMic talkMic;  // the app's own recording for this press (behind a hidden switch), or null
+    private String talkDoubt;  // the setting to count a refusal in if the next try, without that way, opens the microphone
+    private SpeechRecognizer talkQuietFor;  // the recognizer a tap's quiet timer is running for
+    private boolean talkOffline;  // asking for the phone's offline recognition, after a network error
+    private boolean talkOpen;  // the recognizer is hearing a piece: listening started and hasn't ended
+    private boolean talkReady;  // the microphone opened in this piece
+    private boolean talkFresh;  // the next piece needs a fresh recognizer
+    private boolean talkFinger;  // the finger that started this press is still down (Android's own count)
+    private boolean talkTicked;  // the little buzz when the microphone first opened
+    private int talkListens;  // pieces started in this press
+    private long talkStarted, talkOpenedAt, talkSpeechEnded, talkLevelAt;
+    private Object talkFocus;  // the audio focus this press holds (an AudioFocusRequest on Android 8 and newer)
+    private volatile boolean fingerIsDown;  // a finger is on the page, as Android itself sees it
+    private int firstFinger = -1;
     private TextToSpeech voice;  // Motorcycle Man's spoken replies, in the phone's own voice
     private boolean voiceReady;
     private String voiceWaiting;  // what to say once the voice has started up
@@ -241,12 +293,35 @@ public class MainActivity extends Activity {
     }
 
     private void noteRequest(Intent intent) {
-        if (intent != null && intent.hasExtra(EXTRA_DO)) {
-            pendingDo = intent.getStringExtra(EXTRA_DO);
+        try {
+            // Only from the app's own widget, tile and share sheet (they carry its key), never with a link.
+            if (intent == null || intent.getData() != null || intent.hasCategory(Intent.CATEGORY_BROWSABLE)
+                    || !insideKey(this).equals(intent.getStringExtra(EXTRA_FROM_APP))) {
+                return;
+            }
+            String what = intent.getStringExtra(EXTRA_DO);
+            if (what != null && Arrays.asList("listen", "screen", "remote").contains(what)) {
+                pendingDo = what;
+            }
+            if (intent.hasExtra(EXTRA_ASK)) {
+                pendingAsk = intent.getStringExtra(EXTRA_ASK);
+            }
+        } catch (RuntimeException ignored) {
+            // Extras another app packed that can't be read.
         }
-        if (intent != null && intent.hasExtra(EXTRA_ASK)) {
-            pendingAsk = intent.getStringExtra(EXTRA_ASK);
+    }
+
+    // A random key made once and kept in the app's private storage, which no other app can read.
+    static synchronized String insideKey(Context context) {
+        SharedPreferences prefs = context.getSharedPreferences("motorcycleman", MODE_PRIVATE);
+        String key = prefs.getString(KEY_INSIDE, null);
+        if (key == null) {
+            byte[] random = new byte[16];
+            new SecureRandom().nextBytes(random);
+            key = PcFinder.hex(random);
+            prefs.edit().putString(KEY_INSIDE, key).apply();
         }
+        return key;
     }
 
     // Clipboard sync: what was copied on this phone goes to the PC as the app comes to the front (Android lets only
@@ -321,6 +396,9 @@ public class MainActivity extends Activity {
         if (recognizer != null) {
             recognizer.cancel();
         }
+        cancelTalk(true);  // a press stops when the app leaves the front (Home, a call, the screen off); the page hears so
+        fingerIsDown = false;
+        firstFinger = -1;
         if (voice != null) {
             voice.stop();
         }
@@ -331,6 +409,7 @@ public class MainActivity extends Activity {
         if (recognizer != null) {
             recognizer.destroy();
         }
+        cancelTalk(false);
         if (voice != null) {
             voice.shutdown();
         }
@@ -460,6 +539,7 @@ public class MainActivity extends Activity {
     // Android lets anyone open these) for a PC this phone hasn't connected to is followed only once the user says
     // so: a stranger's link could otherwise put their own "PC" in place of the user's (found in October 2026).
     private void openFromOutside(final String url, final boolean running) {
+        pendingDo = pendingAsk = null;  // nothing asked for earlier runs on the PC a link from outside names
         if (knownToken(tokenOf(url))) {
             follow(url, running);
             return;
@@ -1485,20 +1565,23 @@ public class MainActivity extends Activity {
         web.evaluateJavascript("window." + function + " && window." + function + "(" + arguments + ")", null);
     }
 
+    // Listening for pages from before app 1.1 (startListening), exactly as app 1.0 did: one piece, which ends at the
+    // first quiet. Those pages start it again themselves while the helmet is held.
     private void startSpeech(String language) {
         // Only Motorcycle Man's own page may use the microphone.
         if (!isPcAddress(Uri.parse(String.valueOf(web.getUrl())))) {
             return;
         }
+        cancelTalk(true);  // a press of the newer kind stops, so only one recognizer has the microphone
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[] {Manifest.permission.RECORD_AUDIO}, 1);
+            requestPermissions(new String[] {Manifest.permission.RECORD_AUDIO}, ASK_MICROPHONE);
             callPage("onAndroidSpeechError", JSONObject.quote(ALLOW_MICROPHONE));
             return;
         }
         if (recognizer == null) {
             if (SpeechRecognizer.isRecognitionAvailable(this)) {
                 recognizer = SpeechRecognizer.createSpeechRecognizer(this);
-            } else if (Build.VERSION.SDK_INT >= 33 && SpeechRecognizer.isOnDeviceRecognitionAvailable(this)) {
+            } else if (Build.VERSION.SDK_INT >= 31 && SpeechRecognizer.isOnDeviceRecognitionAvailable(this)) {
                 recognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(this);
             } else {
                 callPage("onAndroidSpeechError", JSONObject.quote("This phone has no speech recognition service."));
@@ -1517,15 +1600,587 @@ public class MainActivity extends Activity {
         recognizer.startListening(intent);
     }
 
+    // ---- Holding the helmet (pages for app 1.1 and newer) ----
+    // One press is one talk key from the page. While the finger is down (HELD), a pause the phone's recognizer hears
+    // ends only a piece: its words are kept and the next piece starts at once, or, on Android 13 and newer, one long
+    // segmented session goes on through the pauses. A tap, the tile and the widget (UNTIL_QUIET) end at the first
+    // quiet with words. Let go (ENDING) gets the last words. Every press ends with exactly one final
+    // onAndroidSpeech(words, true, key), unless the page cancelled it or a newer press replaced it. The screen and the
+    // PC are never touched here: the page decides what to do with the words.
+
+    private final Runnable talkAgain = new Runnable() {
+        @Override
+        public void run() {
+            listenAgain(talkFresh);
+        }
+    };
+    private final Runnable talkTooLong = new Runnable() {
+        @Override
+        public void run() {
+            endTalk(talkKey);  // two minutes held, or 30 seconds of a tap: what was heard goes
+        }
+    };
+    private final Runnable talkNothingSaid = new Runnable() {
+        @Override
+        public void run() {
+            if (talkMode == SpeechTurn.UNTIL_QUIET && turn.isEmpty()) {
+                finishTalk(null);  // a tap, and 8 seconds of nothing
+            }
+        }
+    };
+    private final Runnable talkLastWords = new Runnable() {
+        @Override
+        public void run() {
+            if (talkMode == SpeechTurn.ENDING) {
+                Log.i(TAG, "no last results " + FINAL_WORDS_MS + " ms after let-go");
+                finishTalk(null);  // the recognizer never answered the let-go: what it showed so far goes
+            }
+        }
+    };
+    private final Runnable talkNotReady = new Runnable() {
+        @Override
+        public void run() {
+            if (talkMode != SpeechTurn.OFF && talkOpen && !talkReady) {
+                Log.i(TAG, "microphone not open after " + (SystemClock.uptimeMillis() - talkOpenedAt) + " ms");
+                pieceEnded(SpeechTurn.TROUBLE, "", "", -1);
+            }
+        }
+    };
+    // A tap that heard words, and no new ones for SpeechTurn.QUIET_MS: the recognizer is asked for its last words
+    // (some services wait far longer for the quiet than they are asked to).
+    private final Runnable talkQuiet = new Runnable() {
+        @Override
+        public void run() {
+            if (talkQuietFor == talkRecognizer && talkOpen && turn.quietEnds(talkMode)) {
+                Log.i(TAG, "quiet for " + SpeechTurn.QUIET_MS + " ms after a tap");
+                endTalk(talkKey);
+            }
+        }
+    };
+    private final AudioManager.OnAudioFocusChangeListener focusChanged = new AudioManager.OnAudioFocusChangeListener() {
+        @Override
+        public void onAudioFocusChange(int change) {
+            Log.i(TAG, "audio focus now " + change);
+        }
+    };
+
+    // A press of the helmet: listens from now, through every pause, until the page says how it ends.
+    private void beginTalk(String language, String key, String options) {
+        cancelTalk(false);  // an older press of this page is replaced: no more answers for it
+        if (recognizer != null) {
+            recognizer.cancel();  // an older page's listening stops too, so only one recognizer has the microphone
+        }
+        talkKey = key;
+        // Only Motorcycle Man's own page may use the microphone.
+        if (!isPcAddress(Uri.parse(String.valueOf(web.getUrl())))) {
+            refuseTalk("Open Motorcycle Man from your PC's address to talk.");
+            return;
+        }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[] {Manifest.permission.RECORD_AUDIO}, ASK_MICROPHONE);
+            refuseTalk(ALLOW_MICROPHONE);
+            return;
+        }
+        if (!hasSpeechService()) {
+            refuseTalk("This phone has no speech recognition service.");
+            return;
+        }
+        talkLanguage = language != null && language.matches("[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8}){0,3}") ? language : "en-US";
+        talkHints = hintsFrom(options);
+        turn.reset("en-US".equalsIgnoreCase(talkLanguage));
+        talkMode = SpeechTurn.HELD;
+        talkSegmented = Build.VERSION.SDK_INT >= 33 && !refused(KEY_SEGMENTED);
+        talkDoubt = null;
+        talkOffline = false;
+        talkTicked = false;
+        talkListens = 0;
+        talkSpeechEnded = 0;
+        talkFinger = fingerIsDown;
+        talkStarted = SystemClock.uptimeMillis();
+        voiceWaiting = null;  // Motorcycle Man doesn't talk while it listens: the microphone would hear it
+        if (voice != null) {
+            voice.stop();
+        }
+        holdAudioFocus();
+        handler.postDelayed(talkTooLong, HOLD_MS);
+        if (talkSegmented && optionOn(options, "ownMic") && !refused(KEY_OWN_MIC)) {
+            // The page's hidden switch: the app records the microphone itself, with the phone's echo canceller.
+            talkMic = OwnMic.open(this, optionOn(options, "cleanNoise"), optionOn(options, "evenLoudness"));
+        }
+        Log.i(TAG, "press " + (talkMic != null ? "own" : talkSegmented ? "seg" : "loop") + ", Android API " + Build.VERSION.SDK_INT);
+        listenAgain(true);  // a fresh recognizer for every press: nothing left over from the last one
+    }
+
+    // A press that can't start: why, and its one final answer (with no words), so the page never waits for it.
+    private void refuseTalk(String problem) {
+        String key = JSONObject.quote(talkKey);
+        callPage("onAndroidSpeechError", JSONObject.quote(problem) + ", " + key);
+        callPage("onAndroidSpeech", "\"\", true, " + key);
+        Log.i(TAG, "press refused");
+    }
+
+    private boolean hasSpeechService() {
+        return SpeechRecognizer.isRecognitionAvailable(this)
+                || (Build.VERSION.SDK_INT >= 31 && SpeechRecognizer.isOnDeviceRecognitionAvailable(this));
+    }
+
+    private SpeechRecognizer newRecognizer() {
+        if (SpeechRecognizer.isRecognitionAvailable(this)) {
+            return SpeechRecognizer.createSpeechRecognizer(this);
+        }
+        if (Build.VERSION.SDK_INT >= 31 && SpeechRecognizer.isOnDeviceRecognitionAvailable(this)) {
+            return SpeechRecognizer.createOnDeviceSpeechRecognizer(this);
+        }
+        return null;
+    }
+
+    // The names the page asks the recognizer to expect: {"hints": ["Spotify", ...]}, at most 50 of 40 letters each.
+    private static ArrayList<String> hintsFrom(String options) {
+        ArrayList<String> hints = new ArrayList<>();
+        if (options == null || options.trim().isEmpty()) {
+            return hints;
+        }
+        try {
+            JSONArray asked = new JSONObject(options).optJSONArray("hints");
+            for (int i = 0; asked != null && i < asked.length() && hints.size() < MOST_HINTS; i++) {
+                String hint = asked.optString(i, "").trim();
+                if (!hint.isEmpty() && hint.length() <= 40) {
+                    hints.add(hint);
+                }
+            }
+        } catch (JSONException e) {
+            hints.clear();  // not what the page sends: no hints
+        }
+        return hints;
+    }
+
+    // A yes/no option from the page, such as {"ownMic": true}; anything else is no.
+    private static boolean optionOn(String options, String name) {
+        if (options == null || options.trim().isEmpty()) {
+            return false;
+        }
+        try {
+            return new JSONObject(options).optBoolean(name, false);
+        } catch (JSONException e) {
+            return false;
+        }
+    }
+
+    // Whether this phone's speech service refused a way of listening in several presses lately (see
+    // SpeechTurn.refuses). A new speech service, or an update of it, is tried afresh.
+    private boolean refused(String setting) {
+        String service = speechService();
+        return SpeechTurn.refuses(prefs().getString(setting, ""), service, serviceVersion(service), System.currentTimeMillis());
+    }
+
+    // The version of the app that gives the speech service (0 when Android won't say).
+    @SuppressWarnings("deprecation")  // versionCode, for Android 8 and older
+    private long serviceVersion(String service) {
+        ComponentName name = ComponentName.unflattenFromString(service);
+        if (name == null) {
+            return 0;
+        }
+        try {
+            PackageInfo info = getPackageManager().getPackageInfo(name.getPackageName(), 0);
+            if (Build.VERSION.SDK_INT >= 28) {
+                return info.getLongVersionCode();
+            }
+            return info.versionCode;
+        } catch (PackageManager.NameNotFoundException | RuntimeException e) {
+            return 0;
+        }
+    }
+
+    private String speechService() {
+        try {
+            String service = Settings.Secure.getString(getContentResolver(), "voice_recognition_service");
+            return service == null || service.isEmpty() ? "default" : service;
+        } catch (RuntimeException e) {
+            return "default";  // Android wouldn't say
+        }
+    }
+
+    // The next piece of this press: on the same recognizer right after a pause, or on a fresh one after trouble.
+    private void listenAgain(boolean fresh) {
+        if (talkMode != SpeechTurn.HELD && talkMode != SpeechTurn.UNTIL_QUIET) {
+            return;
+        }
+        if (fresh || talkRecognizer == null) {
+            if (talkRecognizer != null) {
+                talkRecognizer.destroy();
+            }
+            talkRecognizer = newRecognizer();
+            if (talkRecognizer == null) {
+                finishTalk("This phone has no speech recognition service.");
+                return;
+            }
+            talkRecognizer.setRecognitionListener(new TalkListener(talkRecognizer, talkKey));
+        }
+        talkReady = false;
+        talkOpen = true;
+        talkOpenedAt = SystemClock.uptimeMillis();
+        talkRecognizer.startListening(talkIntent());
+        talkListens++;
+        handler.removeCallbacks(talkNotReady);
+        handler.postDelayed(talkNotReady, talkMic != null ? OWN_MIC_READY_MS : READY_MS);
+        Log.i(TAG, "listen " + talkListens + (fresh ? " fresh " : " again ") + (talkMic != null ? "own" : talkSegmented ? "seg" : "loop"));
+    }
+
+    private Intent talkIntent() {
+        Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+        intent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
+        intent.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, getPackageName());
+        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, talkLanguage);
+        intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1);
+        if (talkOffline) {
+            intent.putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true);  // the internet failed once in this press
+        }
+        if (Build.VERSION.SDK_INT >= 33 && !talkHints.isEmpty()) {
+            intent.putStringArrayListExtra(RecognizerIntent.EXTRA_BIASING_STRINGS, talkHints);  // app and routine names
+        }
+        if (Build.VERSION.SDK_INT >= 33 && talkMic != null) {
+            // The app's own recording: one long session that lasts as long as the sound does (until let-go).
+            intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE, talkMic.source());
+            intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_CHANNEL_COUNT, OwnMic.CHANNELS);
+            intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_ENCODING, OwnMic.ENCODING);
+            intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_SAMPLING_RATE, OwnMic.RATE);
+            intent.putExtra(RecognizerIntent.EXTRA_SEGMENTED_SESSION, RecognizerIntent.EXTRA_AUDIO_SOURCE);
+        } else if (Build.VERSION.SDK_INT >= 33 && talkSegmented) {
+            // One long session through every pause; each pause's words come in onSegmentResults.
+            intent.putExtra(RecognizerIntent.EXTRA_SEGMENTED_SESSION, RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS);
+            intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, HOLD_MS);
+        } else {
+            // A longer quiet before a piece ends, longer still once the first piece is in. Many services ignore it.
+            // The limit of this way (Android 12 and older, or a service that refused long sessions): between two pieces
+            // the microphone is off for a moment, so a word said in that short restart gap can be lost. (No second
+            // recording runs alongside to catch it: two would fight over the microphone.) The page logs such a press
+            // with how "gap".
+            boolean later = talkMode == SpeechTurn.HELD && talkListens > 0;
+            intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, later ? 2500L : 1500L);
+            intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, later ? 2000L : 1200L);
+        }
+        return intent;
+    }
+
+    // The page's tap (or the tile, or the widget): the first quiet with words ends this press.
+    private void tapTalk(String key) {
+        if (!talkKey.equals(key) || talkMode != SpeechTurn.HELD) {
+            return;
+        }
+        long held = SystemClock.uptimeMillis() - talkStarted;
+        Log.i(TAG, "tap after " + held + " ms");
+        talkMode = SpeechTurn.UNTIL_QUIET;
+        talkFinger = false;  // that finger already let go
+        handler.removeCallbacks(talkTooLong);
+        handler.postDelayed(talkTooLong, TAP_MS);
+        handler.postDelayed(talkNothingSaid, Math.max(0, SpeechTurn.WAIT_FOR_WORDS_MS - held));
+        if (!talkOpen && !turn.isEmpty()) {
+            finishTalk(null);  // in a pause after words: that quiet already came
+            return;
+        }
+        quietAgain();
+    }
+
+    // A tap's quiet timer starts again (a new word, or the end of speech); it does nothing for a held press.
+    private void quietAgain() {
+        handler.removeCallbacks(talkQuiet);
+        long ms = SpeechTurn.quietTimerMs(talkMode);
+        if (ms > 0 && talkOpen) {
+            talkQuietFor = talkRecognizer;
+            handler.postDelayed(talkQuiet, ms);
+        }
+    }
+
+    // Let go (or a second tap, or the time is up): the recognizer's last words, then the end.
+    private void endTalk(String key) {
+        if (!talkKey.equals(key) || talkMode == SpeechTurn.OFF || talkMode == SpeechTurn.ENDING) {
+            return;
+        }
+        Log.i(TAG, "let go after " + (SystemClock.uptimeMillis() - talkStarted) + " ms" + (talkOpen ? "" : ", in a pause"));
+        talkMode = SpeechTurn.ENDING;
+        talkFinger = false;
+        handler.removeCallbacks(talkAgain);  // let go in a pause: no next piece
+        handler.removeCallbacks(talkTooLong);
+        handler.removeCallbacks(talkNothingSaid);
+        if (!talkOpen || !talkReady || talkRecognizer == null) {
+            finishTalk(null);  // in a pause, or before the microphone opened: nothing more is coming
+            return;
+        }
+        if (talkMic != null) {
+            talkMic.finish();  // the app's own recording ends, so the sound the service reads ends too
+        }
+        talkRecognizer.stopListening();
+        handler.postDelayed(talkLastWords, FINAL_WORDS_MS);
+    }
+
+    // The press is over: its one final answer with every word heard, after the problem if there was one. After a
+    // let-go with words, a late problem (some services report one after stopping) isn't worth showing.
+    private void finishTalk(String problem) {
+        if (talkMode == SpeechTurn.OFF) {
+            return;
+        }
+        boolean letGo = talkMode == SpeechTurn.ENDING;
+        talkMode = SpeechTurn.OFF;
+        stopRecognizer();
+        String key = JSONObject.quote(talkKey);
+        if (problem != null && !problem.isEmpty() && !(letGo && !turn.isEmpty())) {
+            callPage("onAndroidSpeechError", JSONObject.quote(problem) + ", " + key);
+        }
+        callPage("onAndroidSpeech", JSONObject.quote(turn.text()) + ", true, " + key);
+        Log.i(TAG, "finished after " + (SystemClock.uptimeMillis() - talkStarted) + " ms, " + talkListens + " listens");
+    }
+
+    // The press is dropped (the page was left or reloaded, the app went to the back, or a newer press began):
+    // nothing more is sent, except "stopped" when the page should know.
+    private void cancelTalk(boolean tellPage) {
+        if (talkMode == SpeechTurn.OFF) {
+            return;
+        }
+        talkMode = SpeechTurn.OFF;
+        stopRecognizer();
+        Log.i(TAG, "cancelled after " + (SystemClock.uptimeMillis() - talkStarted) + " ms");
+        if (tellPage) {
+            callPage("onAndroidSpeechState", "\"stopped\", " + JSONObject.quote(talkKey) + ", \"\"");
+        }
+    }
+
+    private void stopRecognizer() {
+        handler.removeCallbacks(talkAgain);
+        handler.removeCallbacks(talkTooLong);
+        handler.removeCallbacks(talkNothingSaid);
+        handler.removeCallbacks(talkLastWords);
+        handler.removeCallbacks(talkNotReady);
+        handler.removeCallbacks(talkQuiet);
+        talkQuietFor = null;
+        talkOpen = false;
+        talkFinger = false;
+        if (talkRecognizer != null) {
+            talkRecognizer.destroy();
+            talkRecognizer = null;
+        }
+        closeMic();
+        letAudioFocusGo();
+    }
+
+    private void closeMic() {
+        if (talkMic != null) {
+            talkMic.close();
+            talkMic = null;
+        }
+    }
+
+    // A piece ended. how: SpeechTurn.ENDED, TROUBLE...; results: its words, if the recognizer gave any; problem: what
+    // to tell the user if this ends the press; error: the recognizer's error number, or -1 for none.
+    private void pieceEnded(int how, String results, String problem, int error) {
+        if (!talkOpen) {
+            return;  // a second end for the same piece (some services send an error after the results)
+        }
+        talkOpen = false;
+        handler.removeCallbacks(talkNotReady);
+        handler.removeCallbacks(talkQuiet);
+        talkQuietFor = null;
+        boolean wasReady = talkReady;
+        long now = SystemClock.uptimeMillis();
+        turn.ended(results);
+        boolean micWasOwn = talkMic != null;
+        // Only a refusal (SpeechTurn.isRefusal) counts against a way of listening, and only when the next try,
+        // without it, opens the microphone (see micOpen); then the way is tried again in later presses until the
+        // service has refused it in SpeechTurn.DOUBT_PRESSES of them.
+        boolean refusal = (micWasOwn || talkSegmented) && SpeechTurn.isRefusal(error, wasReady);
+        if (micWasOwn) {
+            // The app's own recording is one long session per press: whatever ended it, the press goes on (if it does)
+            // the usual way, on a fresh recognizer.
+            closeMic();
+            if (refusal || (!wasReady && how != SpeechTurn.NO_NETWORK && how != SpeechTurn.NO_LANGUAGE)) {
+                how = SpeechTurn.TROUBLE;
+            }
+            if (refusal) {
+                talkDoubt = KEY_OWN_MIC;
+            }
+        } else if (talkSegmented && (refusal || (!wasReady && (how == SpeechTurn.TROUBLE || how == SpeechTurn.ENDED)))) {
+            // Trouble before the microphone opened: the rest of this press listens piece by piece.
+            talkSegmented = false;
+            if (refusal) {
+                how = SpeechTurn.TROUBLE;
+                talkDoubt = KEY_SEGMENTED;
+            }
+        }
+        int step = turn.next(talkMode, how, now - talkStarted, wasReady);
+        Log.i(TAG, "end " + how + (wasReady ? " ready " : " unready ") + (now - talkOpenedAt) + " ms, next " + step);
+        if (step == SpeechTurn.FINISH) {
+            String shown = problem;
+            if ((shown == null || shown.isEmpty()) && !wasReady && turn.tries() > 0 && talkMode != SpeechTurn.ENDING) {
+                shown = talkMode == SpeechTurn.HELD ? STUCK : STUCK_TAP;  // the microphone never opened, try after try
+            }
+            finishTalk(shown);
+            return;
+        }
+        if (step == SpeechTurn.AGAIN_OFFLINE) {
+            talkOffline = true;
+        } else if (step == SpeechTurn.AGAIN_ENGLISH) {
+            talkLanguage = "en-US";
+        }
+        String key = JSONObject.quote(talkKey);
+        callPage("onAndroidSpeech", JSONObject.quote(turn.text()) + ", false, " + key);
+        callPage("onAndroidSpeechState", "\"gap\", " + key + ", \"" + (talkSegmented ? "seg" : "loop") + "\"");
+        talkFresh = step != SpeechTurn.AGAIN || micWasOwn;
+        handler.postDelayed(talkAgain, talkFresh ? SpeechTurn.backoffMs(turn.tries()) : 0);  // 0: the next main-loop turn
+    }
+
+    // The microphone is open: the recognizer is ready, or already hears speech.
+    private void micOpen() {
+        if (talkReady) {
+            return;
+        }
+        talkReady = true;
+        turn.ready();
+        handler.removeCallbacks(talkNotReady);
+        long now = SystemClock.uptimeMillis();
+        if (talkDoubt != null) {
+            // Without that way, the microphone opened: one more press in which this service refused it.
+            String service = speechService();
+            String stored = SpeechTurn.afterRefusal(prefs().getString(talkDoubt, ""), service, serviceVersion(service),
+                    System.currentTimeMillis());
+            prefs().edit().putString(talkDoubt, stored).apply();
+            Log.i(TAG, "refused " + talkDoubt + ", " + stored.substring(0, stored.indexOf('|')) + " of "
+                    + SpeechTurn.DOUBT_PRESSES + " presses");
+            talkDoubt = null;
+        }
+        if (!talkTicked) {
+            talkTicked = true;
+            web.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);  // a tiny buzz: talk now
+        }
+        callPage("onAndroidSpeechState", "\"ready\", " + JSONObject.quote(talkKey) + ", \"" + (talkSegmented ? "seg" : "loop") + "\"");
+        Log.i(TAG, "ready after " + (now - talkOpenedAt) + " ms" + (talkSpeechEnded > 0 ? ", gap " + (now - talkSpeechEnded) + " ms" : ""));
+        talkSpeechEnded = 0;
+    }
+
+    // While a press listens, other sound (music, a video) pauses, so the microphone hears only the user.
+    @SuppressWarnings("deprecation")  // the older way, for Android 7
+    private void holdAudioFocus() {
+        AudioManager audio = (AudioManager) getSystemService(AUDIO_SERVICE);
+        if (audio == null || talkFocus != null) {
+            return;
+        }
+        int answer;
+        if (Build.VERSION.SDK_INT >= 26) {
+            AudioFocusRequest request = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
+                    .setAudioAttributes(new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANT)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+                    .setOnAudioFocusChangeListener(focusChanged, handler)
+                    .build();
+            answer = audio.requestAudioFocus(request);
+            talkFocus = request;
+        } else {
+            answer = audio.requestAudioFocus(focusChanged, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE);
+            talkFocus = focusChanged;
+        }
+        Log.i(TAG, "audio focus " + (answer == AudioManager.AUDIOFOCUS_REQUEST_GRANTED ? "granted" : "refused " + answer));
+    }
+
+    @SuppressWarnings("deprecation")
+    private void letAudioFocusGo() {
+        if (talkFocus == null) {
+            return;
+        }
+        AudioManager audio = (AudioManager) getSystemService(AUDIO_SERVICE);
+        if (audio != null) {
+            if (Build.VERSION.SDK_INT >= 26) {
+                audio.abandonAudioFocusRequest((AudioFocusRequest) talkFocus);
+            } else {
+                audio.abandonAudioFocus(focusChanged);
+            }
+        }
+        talkFocus = null;
+    }
+
+    // What the page says when the recognizer stops a press with an error ("" for nothing heard).
+    private static String problemFor(int error) {
+        switch (error) {
+            case SpeechRecognizer.ERROR_NO_MATCH:
+            case SpeechRecognizer.ERROR_SPEECH_TIMEOUT:
+            case SpeechRecognizer.ERROR_CLIENT:  // after a stop, or the microphone never opened (then STUCK)
+                return "";
+            case SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS:
+                return ALLOW_MICROPHONE;
+            case SpeechRecognizer.ERROR_AUDIO:
+                return "Another app is using the microphone. Close it and try again.";
+            case SpeechRecognizer.ERROR_NETWORK:
+            case SpeechRecognizer.ERROR_NETWORK_TIMEOUT:
+                return "The phone's speech recognition needs the internet. Check the Wi-Fi and try again.";
+            case SpeechRecognizer.ERROR_RECOGNIZER_BUSY:
+            case SpeechRecognizer.ERROR_TOO_MANY_REQUESTS:
+                return "The phone's speech recognition is busy. Try again in a moment.";
+            default:
+                return "The phone's speech recognition stopped (error " + error + "). Try again.";
+        }
+    }
+
+    private static boolean isTalkKey(String talk) {
+        return talk != null && talk.matches("[0-9a-f]{8}-[0-9]{1,9}");
+    }
+
+    // Only watches: the web view still gets every touch and does its own clicks.
+    @SuppressLint("ClickableViewAccessibility")
+    private void watchFinger() {
+        web.setOnTouchListener(new View.OnTouchListener() {
+            @Override
+            public boolean onTouch(View view, MotionEvent event) {
+                fingerMoved(event);
+                return false;
+            }
+        });
+    }
+
+    // Android's own view of the first finger on the page. When it really lifts ("up"), or Android takes it away
+    // ("cancel": the notification shade, a back gesture), the press that finger started hears about it, even when
+    // the web view stopped telling the page about that finger (a long press can do that).
+    private void fingerMoved(MotionEvent event) {
+        switch (event.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+                firstFinger = event.getPointerId(0);
+                fingerIsDown = true;
+                break;
+            case MotionEvent.ACTION_POINTER_UP:
+                if (event.getPointerId(event.getActionIndex()) == firstFinger) {
+                    fingerLifted("up");
+                }
+                break;
+            case MotionEvent.ACTION_UP:
+                if (firstFinger != -1) {
+                    fingerLifted("up");
+                }
+                break;
+            case MotionEvent.ACTION_CANCEL:
+                if (firstFinger != -1) {
+                    fingerLifted("cancel");
+                }
+                break;
+            default:
+                break;
+        }
+    }
+
+    private void fingerLifted(String how) {
+        fingerIsDown = false;
+        firstFinger = -1;
+        if (talkFinger && talkMode != SpeechTurn.OFF) {
+            talkFinger = false;
+            Log.i(TAG, "finger " + how + " after " + (SystemClock.uptimeMillis() - talkStarted) + " ms");
+            callPage("onAndroidFinger", JSONObject.quote(how) + ", " + JSONObject.quote(talkKey));
+        }
+    }
+
     // The phone page reaches this as window.MotorcycleManAndroid. JavaScript calls arrive on a background
     // thread, and SpeechRecognizer only works on the main thread.
     private class SpeechBridge {
         @JavascriptInterface
         public boolean isAvailable() {
-            return SpeechRecognizer.isRecognitionAvailable(MainActivity.this)
-                    || (Build.VERSION.SDK_INT >= 33 && SpeechRecognizer.isOnDeviceRecognitionAvailable(MainActivity.this));
+            return hasSpeechService();
         }
 
+        // Pages from before app 1.1: one piece, which ends at the first quiet.
         @JavascriptInterface
         public void startListening(final String language) {
             runOnUiThread(new Runnable() {
@@ -1534,6 +2189,64 @@ public class MainActivity extends Activity {
                     startSpeech(language);
                 }
             });
+        }
+
+        // Holding the helmet. talk is the page's name for this press (every answer carries it), and options
+        // {"hints": [names]} the names to expect. Listens through every pause until listenUntilQuiet (a tap),
+        // doneListening (let go) or cancelListening (dropped).
+        @JavascriptInterface
+        public void listen(final String language, final String talk, final String options) {
+            if (!isTalkKey(talk)) {
+                return;
+            }
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    beginTalk(language, talk, options);
+                }
+            });
+        }
+
+        // A tap, the tile or the widget: this press ends at its first quiet with words.
+        @JavascriptInterface
+        public void listenUntilQuiet(final String talk) {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    tapTalk(talk);
+                }
+            });
+        }
+
+        // Let go: the last words, then the press's final answer.
+        @JavascriptInterface
+        public void doneListening(final String talk) {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    endTalk(talk);
+                }
+            });
+        }
+
+        // Dropped (the page was hidden or left): the press stops and sends nothing more.
+        @JavascriptInterface
+        public void cancelListening(final String talk) {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    if (talkKey.equals(talk)) {
+                        cancelTalk(false);
+                    }
+                }
+            });
+        }
+
+        // Whether a finger is on the screen, as Android itself sees it: the web view sometimes stops telling the
+        // page about a finger that is still down.
+        @JavascriptInterface
+        public boolean fingerDown() {
+            return fingerIsDown;
         }
 
         // The page's Guide tile: every feature and how it works, from the app's own copy.
@@ -1691,8 +2404,8 @@ public class MainActivity extends Activity {
     }
 
     private void speakNow(String text) {
-        if (text == null || text.trim().isEmpty()) {
-            return;
+        if (text == null || text.trim().isEmpty() || talkMode != SpeechTurn.OFF) {
+            return;  // nothing to say, or a press is listening: the microphone would hear Motorcycle Man
         }
         if (voice == null) {
             voiceWaiting = text;
@@ -1792,6 +2505,116 @@ public class MainActivity extends Activity {
         }
     }
 
+    // One listener for each recognizer of each press, so a recognizer that was replaced, or an older press, never
+    // reaches the page. Everything from a piece that already ended is ignored too.
+    private class TalkListener implements RecognitionListener {
+        private final SpeechRecognizer mine;
+        private final String key;
+
+        TalkListener(SpeechRecognizer mine, String key) {
+            this.mine = mine;
+            this.key = key;
+        }
+
+        private boolean current() {
+            return mine == talkRecognizer && key.equals(talkKey) && talkMode != SpeechTurn.OFF && talkOpen;
+        }
+
+        @Override
+        public void onReadyForSpeech(Bundle params) {
+            if (current()) {
+                micOpen();
+            }
+        }
+
+        @Override
+        public void onBeginningOfSpeech() {
+            if (current()) {
+                micOpen();
+            }
+        }
+
+        @Override
+        public void onRmsChanged(float rmsdB) {
+            long now = SystemClock.uptimeMillis();
+            if (!current() || !talkReady || now - talkLevelAt < LEVEL_EVERY_MS) {
+                return;
+            }
+            talkLevelAt = now;
+            double level = Math.max(0, Math.min(1, (rmsdB + 2) / 12.0));  // 0 quiet .. 1 loud, so the face can swell
+            callPage("onAndroidSpeechLevel", (Math.round(level * 100) / 100.0) + ", " + JSONObject.quote(key));
+        }
+
+        @Override
+        public void onBufferReceived(byte[] buffer) {
+        }
+
+        @Override
+        public void onEndOfSpeech() {
+            if (current()) {
+                talkSpeechEnded = SystemClock.uptimeMillis();
+                Log.i(TAG, "end of speech after " + (talkSpeechEnded - talkOpenedAt) + " ms");
+                quietAgain();
+            }
+        }
+
+        @Override
+        public void onPartialResults(Bundle partial) {
+            String heard = top(partial);
+            if (!current() || heard.trim().isEmpty()) {
+                return;  // an empty partial never wipes the words already shown
+            }
+            micOpen();
+            turn.hearing(heard);
+            quietAgain();  // a new word: a tap's quiet starts again
+            callPage("onAndroidSpeech", JSONObject.quote(turn.text()) + ", false, " + JSONObject.quote(key));
+        }
+
+        @Override
+        public void onResults(Bundle results) {
+            if (current()) {
+                pieceEnded(SpeechTurn.ENDED, top(results), null, -1);
+            }
+        }
+
+        // Android 13 and newer, in one long session: a pause's words. The session goes on.
+        @Override
+        public void onSegmentResults(Bundle segment) {
+            if (!current()) {
+                return;
+            }
+            micOpen();
+            turn.segment(top(segment));
+            callPage("onAndroidSpeech", JSONObject.quote(turn.text()) + ", false, " + JSONObject.quote(key));
+            if (talkMode == SpeechTurn.UNTIL_QUIET && !turn.isEmpty()) {
+                finishTalk(null);  // a tap ends at its first quiet with words
+            }
+        }
+
+        @Override
+        public void onEndOfSegmentedSession() {
+            if (current()) {
+                pieceEnded(SpeechTurn.ENDED, "", null, -1);
+            }
+        }
+
+        @Override
+        public void onError(int error) {
+            if (current()) {
+                pieceEnded(SpeechTurn.kindOf(error), "", problemFor(error), error);
+            }
+        }
+
+        @Override
+        public void onEvent(int eventType, Bundle params) {
+        }
+
+        private String top(Bundle bundle) {
+            ArrayList<String> heard = bundle == null ? null : bundle.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+            return heard == null || heard.isEmpty() || heard.get(0) == null ? "" : heard.get(0);
+        }
+    }
+
     private void buildViews() {
         web = new WebView(this);
         WebSettings settings = web.getSettings();
@@ -1800,6 +2623,7 @@ public class MainActivity extends Activity {
         // Lets the page hide its "App" button when it is already inside this app.
         settings.setUserAgentString(settings.getUserAgentString() + " MotorcycleManApp/1.0");
         web.addJavascriptInterface(new SpeechBridge(), "MotorcycleManAndroid");
+        watchFinger();
         web.setWebChromeClient(new WebChromeClient() {
             @Override
             public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, FileChooserParams params) {
@@ -1874,6 +2698,11 @@ public class MainActivity extends Activity {
                 if (request.isForMainFrame()) {
                     findPc(savedToken());  // Motorcycle Man is closed, or the PC has a new address on the Wi-Fi
                 }
+            }
+
+            @Override
+            public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                cancelTalk(true);  // a press belongs to the page that started it
             }
 
             @Override

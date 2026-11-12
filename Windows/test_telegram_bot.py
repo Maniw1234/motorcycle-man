@@ -1,6 +1,7 @@
 import mm_test_env  # noqa: F401 (first: the tests never touch the real settings and keys)
 import email.parser
 import email.policy
+import http.client
 import http.server
 import json
 import os
@@ -183,6 +184,46 @@ class TelegramBotTests(unittest.TestCase):
         bot.thread.join(5)
         self.assertFalse(bot.thread.is_alive())  # it stops asking
         self.assertEqual(self.helper.states[-1][0], "bad key")
+
+    def test_a_reply_cut_off_part_way_is_tried_again(self):
+        bot = telegram_bot.TelegramBot(TOKEN, OWNER, self.helper)
+        bot.name = "bike_test_bot"
+        answers = [http.client.IncompleteRead(b"{"), []]
+
+        def call(token, method, params=None, **kwargs):
+            answer = answers.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            bot.stopped.set()
+            return answer
+
+        with mock.patch.object(telegram_bot, "call", side_effect=call), mock.patch.object(bot.stopped, "wait"):
+            bot.run()  # returns, instead of the error ending the thread
+        self.assertEqual(self.helper.states, [("failed", "Can't reach Telegram. Trying again..."), ("on", "bike_test_bot")])
+
+    def test_a_cut_off_or_garbled_reply_is_a_dropped_link(self):
+        # Every caller already handles OSError, so a reply cut off part way never ends a thread.
+        class Reply:
+            def __init__(self, read):
+                self.read = read
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def cut_off(*args):
+            raise http.client.IncompleteRead(b"{")
+
+        for reply in (Reply(cut_off), Reply(lambda *args: b"<html>")):
+            with mock.patch.object(telegram_bot.urllib.request, "urlopen", return_value=reply):
+                with self.assertRaises(ConnectionError) as caught:
+                    telegram_bot.call(TOKEN, "sendMessage", {"chat_id": 1, "text": "hi"})
+            self.assertNotIn(TOKEN, str(caught.exception))
+        with mock.patch.object(telegram_bot, "call", return_value={"file_path": "voice/1.ogg", "file_size": 10}),                 mock.patch.object(telegram_bot.urllib.request, "urlopen", return_value=Reply(cut_off)):
+            with self.assertRaises(ConnectionError):
+                telegram_bot.download(TOKEN, "file-1")
 
     def test_only_the_account_that_sends_the_code_is_let_in(self):
         bot = self.bot(owner=0)

@@ -3,7 +3,7 @@
 # through chat_link. The bot's key is a secret: it is never logged or shown.
 import datetime as dt, json, logging, threading, time, urllib.error, urllib.request, uuid
 
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import ConnectionClosed, WebSocketException
 from websockets.sync.client import connect
 
 LOG = logging.getLogger("motorcycle_man")
@@ -111,7 +111,8 @@ class DiscordBot:
                     return
                 failed = self._wait(failed, delay)
                 delay = min(delay * 2, 60)
-            except (OSError, ValueError, TimeoutError, KeyError, DiscordError):
+            # e.g. a 503 from the gateway (WebSocketException)
+            except (OSError, ValueError, TimeoutError, KeyError, DiscordError, WebSocketException):
                 failed = self._wait(failed, delay)
                 delay = min(delay * 2, 60)
 

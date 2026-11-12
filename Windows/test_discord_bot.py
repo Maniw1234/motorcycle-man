@@ -8,6 +8,9 @@ import time
 import unittest
 from unittest import mock
 
+from websockets.datastructures import Headers
+from websockets.exceptions import InvalidStatus
+from websockets.http11 import Response
 from websockets.sync.server import serve
 
 import chat_link
@@ -150,6 +153,21 @@ class DiscordBotTests(unittest.TestCase):
         bot.thread.join(5)
         self.assertFalse(bot.thread.is_alive())
         self.assertEqual(self.helper.states[-1][0], "bad key")
+
+    def test_a_gateway_that_answers_with_an_error_page_is_tried_again(self):
+        # During a Discord outage the gateway answers 503 instead of opening: the bot says so and keeps trying.
+        bot = discord_bot.DiscordBot(TOKEN, chat_link.ChatLink("discord", self.helper, OWNER))
+        outage = InvalidStatus(Response(503, "Service Unavailable", Headers(), b""))
+        tries = [outage, None]
+
+        def session():
+            if tries[0] is not None:
+                raise tries.pop(0)
+            bot.stopped.set()
+
+        with mock.patch.object(bot, "session", side_effect=session), mock.patch.object(bot.stopped, "wait"):
+            bot.run()  # returns, instead of the error ending the thread
+        self.assertIn(("failed", "Can't reach Discord. Trying again..."), self.helper.states)
 
 
 if __name__ == "__main__":

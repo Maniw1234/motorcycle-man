@@ -13,6 +13,8 @@ import java.net.NetworkInterface;
 import java.net.SocketException;
 import java.net.URL;
 import java.net.URLEncoder;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -24,6 +26,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 
 // Finds Motorcycle Man on the Wi-Fi without a QR code. It asks every address on the phone's own network (and
 // an emulator's host computer) "are you Motorcycle Man?" on Motorcycle Man's port; Motorcycle Man answers with its PC's name and
@@ -143,9 +148,41 @@ final class PcFinder {
         return "http://" + address + ":" + PORT + "/?token=" + encode(token);
     }
 
-    // Whether Motorcycle Man at this address takes the link's secret, as after the PC got a new address.
+    // Whether Motorcycle Man at this address holds the link's secret, as after the PC got a new address. The
+    // secret itself is never sent to find out (any computer on the Wi-Fi can answer /hello and would learn it):
+    // the PC proves it holds it, with an HMAC over a fresh random number and the address it was reached at.
+    // An older Motorcycle Man sends no proof, so the phone connects to it again with the code.
     static boolean accepts(String address, String token) {
-        return get("http://" + address + ":" + PORT + "/status?token=" + encode(token), 1500, 3000) != null;
+        byte[] random = new byte[16];
+        new SecureRandom().nextBytes(random);
+        String nonce = hex(random);
+        String reply = get("http://" + address + ":" + PORT + "/hello?nonce=" + nonce, 1500, 3000);
+        String proof = reply == null ? null : field(reply, "proof");
+        if (proof == null || token == null) {
+            return false;
+        }
+        // 10.0.2.2 is how an emulator reaches the PC it runs on, which sees itself as 127.0.0.1.
+        return proves(proof, token, nonce, address)
+                || ("10.0.2.2".equals(address) && proves(proof, token, nonce, "127.0.0.1"));
+    }
+
+    static boolean proves(String proof, String token, String nonce, String address) {
+        try {
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(token.getBytes("UTF-8"), "HmacSHA256"));
+            String expected = hex(mac.doFinal(("motorcycle-man-hello|" + nonce + "|" + address).getBytes("UTF-8")));
+            return MessageDigest.isEqual(expected.getBytes("UTF-8"), proof.getBytes("UTF-8"));
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    static String hex(byte[] bytes) {
+        StringBuilder text = new StringBuilder();
+        for (byte b : bytes) {
+            text.append(String.format("%02x", b & 0xff));
+        }
+        return text.toString();
     }
 
     // Whether Motorcycle Man at a link's own address takes its secret: "http://192.168.1.20:8080" on the

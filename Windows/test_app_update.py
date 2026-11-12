@@ -135,6 +135,37 @@ class InstallTests(unittest.TestCase):
         self.assertFalse(os.path.exists(self.current + ".old"))
         self.assertEqual(os.listdir(os.path.dirname(self.new)), [])
 
+    def half_copy(self, src, dst):
+        with open(dst, "wb") as f:
+            f.write(b"MZ ha")  # cut off part way
+        raise OSError("the file is held")
+
+    def test_the_old_one_comes_back_when_the_new_one_never_copies(self):
+        launch = mock.Mock()
+        with mock.patch.object(app_update.shutil, "copy2", side_effect=self.half_copy), \
+                mock.patch.object(app_update.time, "sleep"):
+            code = app_update.finish_update(["x", "--finish-update", self.current, "123"], source=self.new,
+                                            wait=lambda pid, seconds: True, launch=launch)
+        self.assertEqual(code, 4)
+        with open(self.current, "rb") as f:
+            self.assertEqual(f.read(), b"MZ old")
+        self.assertFalse(os.path.exists(self.current + ".old"))
+        launch.assert_not_called()
+
+    def test_a_held_file_on_the_first_try_keeps_the_old_one(self):
+        launch = mock.Mock()
+        copies = [self.half_copy, shutil.copy2]
+        with mock.patch.object(app_update.shutil, "copy2", side_effect=lambda src, dst: copies.pop(0)(src, dst)), \
+                mock.patch.object(app_update.time, "sleep"):
+            code = app_update.finish_update(["x", "--finish-update", self.current, "123"], source=self.new,
+                                            wait=lambda pid, seconds: True, launch=launch)
+        self.assertEqual(code, 0)
+        with open(self.current, "rb") as f:
+            self.assertEqual(f.read(), NEW_EXE)
+        with open(self.current + ".old", "rb") as f:
+            self.assertEqual(f.read(), b"MZ old")
+        launch.assert_called_once_with(self.current)
+
     def test_nothing_is_touched_while_the_old_one_runs(self):
         launch = mock.Mock()
         code = app_update.finish_update(["x", "--finish-update", self.current, "123"], source=self.new,

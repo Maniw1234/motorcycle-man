@@ -24,6 +24,7 @@ public class TalkTile extends TileService {
             startActivityAndCollapse(TalkWidget.action(this, "listen", 5));  // Android 14 wants it this way
         } else {
             startActivityAndCollapse(new Intent(this, MainActivity.class).putExtra(MainActivity.EXTRA_DO, "listen")
+                    .putExtra(MainActivity.EXTRA_FROM_APP, MainActivity.insideKey(this))
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
         }
     }

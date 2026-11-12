@@ -24,6 +24,7 @@ public class TalkWidget extends AppWidgetProvider {
     // Opens Motorcycle Man and has its page do `what` ("" just opens it).
     static PendingIntent action(Context context, String what, int code) {
         Intent intent = new Intent(context, MainActivity.class).putExtra(MainActivity.EXTRA_DO, what)
+                .putExtra(MainActivity.EXTRA_FROM_APP, MainActivity.insideKey(context))
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         return PendingIntent.getActivity(context, code, intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
     }

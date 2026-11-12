@@ -85,7 +85,9 @@ public class ShareActivity extends Activity {
                             send("Putting it on the PC's clipboard...", "POST", "/clipboard", "", text);
                         } else {
                             startActivity(new Intent(ShareActivity.this, MainActivity.class)
-                                    .putExtra(MainActivity.EXTRA_ASK, text).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                                    .putExtra(MainActivity.EXTRA_ASK, text)
+                                    .putExtra(MainActivity.EXTRA_FROM_APP, MainActivity.insideKey(ShareActivity.this))
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
                             finish();
                         }
                     }

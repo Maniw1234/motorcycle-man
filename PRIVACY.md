@@ -8,7 +8,7 @@ project. Data leaves your devices only for the features below, and only to the s
 | Feature | Where the data goes | What is sent |
 |---|---|---|
 | Commands that look at the screen, research | The AI you chose: Google (Gemini), Anthropic (Claude), OpenAI (ChatGPT), or the service you set up; nothing leaves the PC with Ollama or LM Studio on it | Your command, a screenshot of your screen, a list of on-screen controls, recent requests, and for research the search results and the text of the top pages |
-| Voice commands | Gemini or ChatGPT (with other AIs, Windows' own speech recognition on the PC) | The recording |
+| Voice commands | Said into the phone (hold-to-talk in the app, or on the phone page when you're away from home): the phone's own speech recognizer, usually Google's. Said at the PC: Gemini or ChatGPT (with other AIs, Windows' own speech recognition on the PC). With Sharp ears set up, the PC writes it down itself and nothing leaves the PC, unless you let it fall back to your AI. Voice messages sent in a chat (Telegram) always go to Gemini or ChatGPT | The recording (on the phone, to the phone's speech service) |
 | Research | Bing, and the web pages found | Your search words; the pages are fetched from your PC (only pages on the public internet) |
 | Morning brief weather | Open-Meteo | The town you set |
 | Internet link (off until you turn it on) | Cloudflare, or ngrok if you set up a fixed address | Everything the phone and PC send each other while you're away (encrypted to Cloudflare/ngrok, which pass it on) |
@@ -40,6 +40,7 @@ storage.
 
 ## Permissions on Android
 
-Microphone (speech), notifications, notification access (only for Phone alerts on the PC), SMS (only for
-text-message commands), Bluetooth (only for the Bluetooth link), and installing updates of itself (from your
-PC or GitHub). Each is asked for when you turn the feature on.
+Microphone (speech; the phone's speech recognizer, usually Google's, hears what you say), notifications,
+notification access (only for Phone alerts on the PC), SMS (only for text-message commands), Bluetooth (only for
+the Bluetooth link), and installing updates of itself (from your PC or GitHub). Each is asked for when you turn the
+feature on.

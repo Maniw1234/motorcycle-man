@@ -168,7 +168,9 @@ class ChatLink:
         self._work(chat, "stop" if word == "stop" else text, sound, guest=name)
 
     def _answer(self, chat, allowed: bool):
-        confirm_id = self.waiting.pop(chat)
+        confirm_id = self.waiting.pop(chat, None)
+        if confirm_id is None:  # the question ended (timed out, or answered on the PC) just as this came in
+            return self.say(chat, "Too late: that question has ended.")
         self.asked.pop(confirm_id, None)
         taken = self.helper.answer(confirm_id, allowed)
         self.say(chat, ("Okay, allowed." if allowed else "Okay, I won't.") if taken else "Too late: that question has ended.")
@@ -257,4 +259,4 @@ class ChatLink:
         # The question was answered elsewhere, or nobody answered in time.
         chat = self.asked.pop(confirm_id, None)
         if chat is not None and self.waiting.get(chat) == confirm_id:
-            del self.waiting[chat]
+            self.waiting.pop(chat, None)  # an answer on the chat's own thread may have just taken it

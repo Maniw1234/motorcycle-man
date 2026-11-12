@@ -161,19 +161,25 @@ def finish_update(argv: list, source: str = None, wait=wait_for_exit, launch=Non
     if not wait(pid, 60):
         return 3  # the old one didn't close: nothing is touched
     backup = current + ".old"
+    moved = False  # once the old exe is moved aside it is the only copy: never removed after that
     for _ in range(20):  # Windows may hold the old file for a moment after its process ends
         try:
-            if os.path.exists(backup):
-                os.remove(backup)
-            if os.path.exists(current):
-                os.replace(current, backup)
+            if not moved:
+                if os.path.exists(backup):
+                    os.remove(backup)  # a stale .old from an earlier update, never this run's backup
+                if os.path.exists(current):
+                    os.replace(current, backup)
+                moved = True
             shutil.copy2(source, current)
             break
         except OSError:
             time.sleep(0.5)
     else:
-        if os.path.exists(backup) and not os.path.exists(current):
-            os.replace(backup, current)  # put the old one back rather than leave nothing
+        if moved and os.path.exists(backup):
+            try:
+                os.replace(backup, current)  # put the old one back, over any half-copied new one
+            except OSError:
+                pass
         return 4
     (launch or start_updated)(current)
     return 0

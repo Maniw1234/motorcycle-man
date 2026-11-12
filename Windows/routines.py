@@ -19,7 +19,12 @@ RUN = re.compile(rf"(?:run|start|do|begin|play)\s+(?:my\s+|the\s+)?{_NAME}(?:\s+
 STEP_BREAK = re.compile(r"\s*(?:;|\n|,\s*(?:and\s+)?(?:then\s+)?|\s+and then\s+|\s+then\s+)\s*", re.IGNORECASE)
 VERBS = {"open", "play", "check", "show", "start", "close", "mute", "pause", "read", "turn", "set", "launch", "search",
          "research", "send", "lock", "put", "find", "go", "scroll", "type", "resume", "skip", "make", "tell"}
-STOPPED = ("Okay, I stopped", "Stopped for", "Skipped for", "I'm still stopping", "Error", "Okay, I won't")
+# Replies that end a routine early: a stop, a step that failed or got stuck, a send waiting for a yes, an error, a
+# no. Only Motorcycle Man's own halt replies (see _execute_smart_action_locked; 3 is its MAX_FAILED_STEPS), never a
+# bare "Stopped", which the AI's own words can start with ("Stopped the music.").
+STOPPED = ("Okay, I stopped", "Stopped for", "Stopped:", "Stopped after 3 failed tries",
+           "Stopped at Motorcycle Man's time or step limit", "Skipped for", "I'm still stopping", "Error",
+           "Okay, I won't", "Ready. Say yes", "I may have sent it")
 
 
 def plain(name: str) -> str:

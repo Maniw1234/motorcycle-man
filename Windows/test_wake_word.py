@@ -133,12 +133,14 @@ class HandsFreeTests(unittest.TestCase):
         app.MIC_RECORDER.stop.return_value = b"RIFF a recording"
         app.MIC_RECORDER.heard_speech = True
         app.MIC_RECORDER.error = ""
+        app.MIC_RECORDER.silent = False
+        app.MIC_RECORDER.replaced.return_value = False
 
     def test_it_listens_does_it_and_answers_out_loud(self):
         with mock.patch.object(app, "execute_smart_action", return_value="Opened Gmail.") as run:
             app.listen_and_run(self.bridge, 1000, 800)
         app.ENGINE.play.assert_called_once_with("listen", always=True)
-        app.MIC_RECORDER.stop.assert_called_once_with(until_quiet=True)
+        app.MIC_RECORDER.stop.assert_called_once_with(until_quiet=True, session=mock.ANY)
         run.assert_called_once_with("", self.bridge, 1000, 800, wav_bytes=b"RIFF a recording")
         app.PC_VOICE.say.assert_called_once_with("Opened Gmail.")
         self.assertFalse(app.PC_LISTENING.locked())
@@ -149,6 +151,31 @@ class HandsFreeTests(unittest.TestCase):
             app.listen_and_run(self.bridge, 1000, 800)
         run.assert_not_called()
         self.bridge.say_sig.emit.assert_called_with("I didn't hear anything.", 3000)
+
+    def test_a_press_on_the_phone_takes_the_microphone(self):
+        app.MIC_RECORDER.stop.return_value = b""  # its recording was replaced by the phone's
+        app.MIC_RECORDER.replaced.return_value = True
+        with mock.patch.object(app, "execute_smart_action") as run:
+            app.listen_and_run(self.bridge, 1000, 800)
+        run.assert_not_called()
+        self.assertNotIn(mock.call("I didn't hear anything.", 3000), self.bridge.say_sig.emit.call_args_list)
+        self.assertFalse(app.PC_LISTENING.locked())
+
+    def test_a_muted_microphone_says_so(self):
+        app.MIC_RECORDER.heard_speech = False
+        app.MIC_RECORDER.silent = True
+        with mock.patch.object(app, "execute_smart_action") as run:
+            app.listen_and_run(self.bridge, 1000, 800)
+        run.assert_not_called()
+        self.bridge.say_sig.emit.assert_called_with(app.PC_MIC_MUTED, 3000)
+
+    def test_asking_again_ends_only_its_own_recording(self):
+        app.MIC_RECORDER.start.return_value = 7
+        with mock.patch.object(app, "execute_smart_action", return_value="Opened Gmail."):
+            app.listen_and_run(self.bridge, 1000, 800)
+        with app.PC_LISTENING:
+            app.listen_and_run(self.bridge, 1000, 800)  # not a phone press's recording that started since
+        app.MIC_RECORDER.stop_listening.assert_called_once_with(7)
 
     def test_asking_again_while_it_listens_ends_the_listening(self):
         with app.PC_LISTENING:

@@ -140,6 +140,21 @@ class ChatLinkTests(unittest.TestCase):
         self.link.owner = ""
         self.assertFalse(self.link.notify("Reminder"))
 
+    def test_a_yes_as_the_question_ends_is_too_late(self):
+        link = self.link
+
+        class EndsOnLook(dict):
+            def __contains__(self, chat):
+                found = dict.__contains__(self, chat)
+                link.asked_done("ending")  # the question timed out right then, on another thread
+                return found
+
+        link.owner, link.waiting = OWNER, EndsOnLook()
+        self.assertTrue(link.ask("ending", "Delete it?"))
+        link.receive(f"dm-{OWNER}", OWNER, "yes")
+        self.assertEqual(self.replies(f"dm-{OWNER}")[-1], "Too late: that question has ended.")
+        self.assertEqual((self.helper.answers, link.asked), ([], {}))
+
 
 class GuestTests(unittest.TestCase):
     def setUp(self):

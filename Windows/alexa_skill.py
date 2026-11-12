@@ -3,9 +3,8 @@
 # A request counts only at that secret address, for the user's own skill (its ID), and from the Amazon account that
 # said the link code; Python here can't check Amazon's signatures (no crypto), so the secret address stands in for
 # them, as the link's secret does for the phone. Anyone who can talk to that Echo can use it.
-import datetime as dt, logging, re, threading, time
+import datetime as dt, re, threading, time
 
-LOG = logging.getLogger("motorcycle_man")
 CLOCK_SLACK = 150  # seconds a request's timestamp may be off, as Amazon allows
 ANSWER_WITHIN = 6.0  # Alexa waits 8 seconds; a longer task is told "on it" and carries on
 DIGIT_WORDS = {"zero": "0", "oh": "0", "o": "0", "one": "1", "two": "2", "to": "2", "too": "2", "three": "3", "four": "4",

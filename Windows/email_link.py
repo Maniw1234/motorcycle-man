@@ -51,14 +51,15 @@ def vouched_for(message, sender: str, address: str) -> bool:
     # Whether the receiving mail service vouched that sender really sent it: its Authentication-Results (the top
     # one, which it added itself) has DMARC passing, or DKIM passing for the sender's own domain. Mail the
     # account sent to itself never passed through that check, and has no such line.
+    # The domain must match to its end: gmail.com.evil.example is not gmail.com.
     results = message.get_all("Authentication-Results") or []
     domain = sender.rsplit("@", 1)[-1].lower()
     if not results:
         return sender == address
     top = str(results[0]).lower()
-    if re.search(r"\bdmarc=pass\b[^;]*header\.from=" + re.escape(domain) + r"\b", top):
+    if re.search(r"\bdmarc=pass\b[^;]*header\.from=" + re.escape(domain) + r"(?![\w.-])", top):
         return True
-    return any(re.search(r"header\.(?:i|d)=@?(?:[\w.-]+\.)?" + re.escape(domain) + r"\b", part)
+    return any(re.search(r"header\.(?:i|d)=@?(?:[\w.-]+\.)?" + re.escape(domain) + r"(?![\w.-])", part)
                for part in top.split(";") if re.search(r"\bdkim=pass\b", part))
 
 
@@ -100,16 +101,17 @@ class EmailLink:
                 imap = imaplib.IMAP4_SSL(self.imap_host, timeout=30)
                 try:
                     imap.login(self.address, self.password)
-                    imap.select("INBOX")
+                    if imap.select("INBOX")[0] != "OK":  # a busy server; tried again like a failed search
+                        raise imaplib.IMAP4.error("select failed")
                     if seen is None:  # only mail that arrives from now on
-                        seen = max([int(uid) for uid in imap.uid("search", None, "ALL")[1][0].split()] or [0])
+                        seen = max(self._uids(imap, "ALL") or [0])
                         self.link.helper.changed("on", self.address)
                     elif failed:
                         self.link.helper.changed("on", self.address)
                     delay, failed = 5, False
                     while not self.stopped.is_set():
-                        found = imap.uid("search", None, f"UID {seen + 1}:*")[1][0].split()
-                        for uid in sorted(int(u) for u in found if int(u) > seen):
+                        found = self._uids(imap, f"UID {seen + 1}:*")
+                        for uid in sorted(u for u in found if u > seen):
                             seen = uid
                             data = imap.uid("fetch", str(uid), "(RFC822)")[1]
                             raw = next((part[1] for part in data if isinstance(part, tuple)), b"")
@@ -134,6 +136,15 @@ class EmailLink:
             except (OSError, ssl.SSLError, EOFError):
                 failed = self._wait(failed, delay)
                 delay = min(delay * 2, 120)
+
+    @staticmethod
+    def _uids(imap, criteria: str) -> list:
+        # The message numbers a search finds. A server that says NO (busy, for one) is an IMAP error, so the
+        # link logs out and tries again; the error's words never look like a refused password.
+        typ, data = imap.uid("search", None, criteria)
+        if typ != "OK" or not data or data[0] is None:
+            raise imaplib.IMAP4.error(f"search failed: {typ}")
+        return [int(u) for u in data[0].split() if u.isdigit()]
 
     def _wait(self, failed: bool, delay: float) -> bool:
         if not self.stopped.is_set():

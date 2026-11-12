@@ -65,7 +65,8 @@
       "use": [
         "Phone: hold the helmet and speak, or type in the box and press send.",
         "PC: press Ctrl+Alt+M, say \"Hey Motorcycle Man\" (turn on Wake word), or type in the Try a command box.",
-        "Say \"stop\" to stop a task, or tap Stop on the phone."
+        "Say \"stop\" to stop a task, or tap Stop on the phone.",
+        "If a task stops halfway, say \"keep going\" or tap Resume task to pick it up."
       ],
       "how": "Simple commands (open an app, volume, music keys) run straight away on the PC. Anything that needs to look at the screen sends a screenshot and a list of the controls on screen to your AI, which answers with the next clicks and keys, step by step, until the task is done.",
       "needs": "An AI with your own key, in the window's AI row."

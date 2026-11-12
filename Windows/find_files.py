@@ -96,7 +96,8 @@ def _from_index(query: dict, home: str, limit: int = 200) -> list:
     connection = comtypes.client.CreateObject("ADODB.Connection")
     connection.Open("Provider=Search.CollatorDSO;Extended Properties='Application=Windows';")
     try:
-        where = [f"SCOPE='file:{_sql_text(home).replace(chr(92), '/')}'"]
+        # The folder keeps its ':' and '\' (as '/'): only a quote in it is doubled.
+        where = [f"SCOPE='file:{home.replace(chr(39), chr(39) * 2).replace(chr(92), '/')}'"]
         words = [_sql_text(w) for w in query["words"] if _sql_text(w)]
         if words:
             in_name = " AND ".join(f"System.FileName LIKE '%{w}%'" for w in words)

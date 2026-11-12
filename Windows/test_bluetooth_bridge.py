@@ -74,6 +74,20 @@ class BluetoothBridgeTests(unittest.TestCase):
         phone.sendall(frame(bt.OPEN, 7))
         self.assertEqual(read_frame(phone), (bt.CLOSE, 7, b""))
 
+    def test_data_for_a_stream_closed_just_then_is_dropped(self):
+        class JustClosed(dict):
+            # Stream 5 was there when looked for, and the pump closed it before its data went out.
+            def __contains__(self, stream):
+                return stream == 5 or super().__contains__(stream)
+
+        phone, pc = socket.socketpair()
+        self.addCleanup(phone.close)
+        mux = bt.Mux(pc, 1, connect=mock.Mock(side_effect=ConnectionRefusedError()))
+        mux.streams = JustClosed()
+        threading.Thread(target=mux.run, daemon=True).start()
+        phone.sendall(frame(bt.DATA, 5, b"more") + frame(bt.OPEN, 7))
+        self.assertEqual(read_frame(phone), (bt.CLOSE, 7, b""))  # the link is still up
+
     def test_bluetooth_never_counts_as_this_pc(self):
         headers = {"Host": "127.0.0.1:8080"}
         with mock.patch.object(app, "connection_owner", return_value=1234), mock.patch.object(app, "same_windows_session", return_value=True):

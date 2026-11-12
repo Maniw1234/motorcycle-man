@@ -1,4 +1,5 @@
 import mm_test_env  # noqa: F401 (first: the tests never touch the real settings and keys)
+import contextlib
 import http.server
 import io
 import json
@@ -423,18 +424,6 @@ class ExecutorLoopTests(unittest.TestCase):
         self.assertIn("#Intent;scheme=motorcycleman;package=app.motorcycleman.remote;S.browser_fallback_url=", page)
         self.assertIn("!/MotorcycleManApp/.test(navigator.userAgent)", page)
 
-    def test_the_saved_gemini_key_moves_over_from_the_old_folder(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            os.makedirs(os.path.join(temp_dir, "Googly"))
-            with open(os.path.join(temp_dir, "Googly", "keys.json"), "w", encoding="utf-8") as handle:
-                json.dump({"gemini_api_key": "saved-before-the-rename"}, handle)
-            with mock.patch.dict(os.environ, {"APPDATA": temp_dir}):
-                path = app.key_file_path()
-            self.assertEqual(path, os.path.join(temp_dir, "Motorcycle Man", "keys.json"))
-            with open(path, encoding="utf-8") as handle:
-                self.assertEqual(json.load(handle)["gemini_api_key"], "saved-before-the-rename")
-            self.assertTrue(os.path.exists(os.path.join(temp_dir, "Googly", "keys.json")))
-
     def test_the_logo_is_bundled_and_the_phone_face_is_the_helmet(self):
         for name in ("motorcycle_man.ico", "motorcycle_man_icon.png"):
             self.assertTrue(os.path.isfile(app.resource_path(name)), name)
@@ -521,7 +510,7 @@ class ExecutorLoopTests(unittest.TestCase):
             self.skipTest("Node isn't installed")
         scripts = [("phone page", script) for script in re.findall(r"<script>(.*?)</script>", app.ANDROID_WEB_CLIENT, re.S)]
         scripts += [("join page", script) for script in re.findall(r"<script>(.*?)</script>", app.JOIN_PAGE, re.S)]
-        scripts += [("service worker", app.SERVICE_WORKER)] if hasattr(app, "SERVICE_WORKER") else []
+        scripts.append(("service worker", app.SERVICE_WORKER))
         self.assertGreaterEqual(len(scripts), 2)
         with tempfile.TemporaryDirectory() as temp_dir:
             for n, (where, script) in enumerate(scripts):
@@ -707,6 +696,24 @@ class ExecutorLoopTests(unittest.TestCase):
         _result, _bridge, gemini, *_ = self.run_task("open the top email", [plan([], "Done.", done=True)])
         self.assertNotIn("Finish their earlier request", gemini.call_args.args[0][-1]["text"])
         self.assertEqual(app.PENDING_SEND["request"], "")
+
+    def test_a_guest_can_t_say_yes_to_a_held_send(self):
+        app.PENDING_SEND.update(request="tweet hello", time=time.time())
+        app.GUEST_COMMAND.name = "Dana"
+        self.addCleanup(setattr, app.GUEST_COMMAND, "name", None)
+        _result, _bridge, gemini, *_ = self.run_task("yes", [plan([], "Done.", done=True)])
+        self.assertNotIn("Finish their earlier request", gemini.call_args.args[0][-1]["text"])
+        self.assertEqual(app.PENDING_SEND["request"], "tweet hello")  # still waiting for the owner
+
+    def test_a_guest_gets_no_owner_only_answers(self):
+        names = ("guard_reply", "find_reply", "settings_reply", "routine_reply")
+        for guest in (None, "Dana"):
+            app.GUEST_COMMAND.name = guest
+            self.addCleanup(setattr, app.GUEST_COMMAND, "name", None)
+            with contextlib.ExitStack() as stack:
+                mocks = [stack.enter_context(mock.patch.object(app, name, return_value=None)) for name in names]
+                self.run_task("show me the thing", [plan([], "Done.", done=True)], quick=True)
+            self.assertEqual([m.called for m in mocks], [not guest] * len(names), guest)
 
     def test_yes_and_no_are_recognized(self):
         for text in ("yes", "Yes!", "yeah do it", "nice job, yes", "go ahead", "send it", "yep post it", "sure"):
@@ -1631,9 +1638,9 @@ class QuickCommandTests(unittest.TestCase):
         self.assertTrue(recorder.heard_speech)
         self.assertEqual(round(app.sound_level(array_of([1000, -1000] * 400))), 1000)
         page = app.ANDROID_WEB_CLIENT
-        for piece in ("const TAP_MS = 350;", "if (Date.now() - pressedAt < TAP_MS) {", "fetch(requestUrl('/listen_stop'))",
-                      "{text: '', auto: '1'}", "afterAndroidSpeech = heardEverything;",
-                      "Tap the face and talk"):
+        for piece in ("const TAP_MS = 350;", "pressKind(heldMs, !!joinWords(committed, live), forcedTap) === 'tap'",
+                      "fetch(requestUrl('/listen_stop', withTalk({})))", "{text: '', auto: '1'}",
+                      "afterAndroidSpeech = heardEverything;", "Tap the face and talk"):
             self.assertIn(piece, page)
 
     def test_what_was_said_is_written_down_and_silence_is_nothing(self):
@@ -1812,13 +1819,25 @@ class InternetLinkTests(unittest.TestCase):
 
     def test_away_from_home_the_phone_listens_itself(self):
         page = app.ANDROID_WEB_CLIENT
-        for piece in ("const remote = location.protocol === 'https:';", "if (!remote) fetch(requestUrl('/hold_start'))",
-                      "recognition.onend = () => { if (tapListening === 'phone') heardEverything(); };"):
+        for piece in ("const remote = location.protocol === 'https:';",
+                      "const engine = holdApp ? 'app' : androidSpeech ? 'app1' : !remote ? 'pc' : recognition ? 'browser' : '';",
+                      "talkStarted = fetch(requestUrl('/hold_start', withTalk({})))",
+                      "recognition.onend = () => browserSpeechEnded();"):
             self.assertIn(piece, page)
         recorder = app.MicRecorder()
-        recorder._sound = bytearray(b"\x01\x00" * 1000)
-        self.assertTrue(recorder.stop().startswith(b"RIFF"))
-        self.assertEqual(recorder.stop(), b"")  # handed over once
+
+        def record(_recorder, take):  # stands in for the microphone: a second of sound, until it is stopped
+            try:
+                for _ in range(20):
+                    _recorder._keep(take, b"\x01\x00" * 800)
+                take.stop.wait(5)
+            finally:
+                take.done.set()
+
+        with mock.patch.object(app.MicRecorder, "_record", record):
+            session = recorder.start()
+            self.assertTrue(recorder.stop(session).startswith(b"RIFF"))
+            self.assertEqual(recorder.stop(session), b"")  # handed over once
 
 
 class StopTests(unittest.TestCase):
@@ -1905,6 +1924,19 @@ class StopTests(unittest.TestCase):
                 app.ask_gemini({"contents": []}, "unit-test-key", lambda data, model: data, models=["gemini-test"])
         self.assertLess(time.monotonic() - began, 1.5)
 
+    def test_a_chat_voice_message_is_written_down_beside_a_stopped_task(self):
+        # A Telegram or chat voice message written down while a task is stopped gets its words, not TaskStopped.
+        self.inside_a_task()
+        app.TASK_STOP.set()
+        self.addCleanup(app.TASK_STOP.clear)
+        with mock.patch.object(app, "ai_ready", return_value=True), \
+                mock.patch.object(app, "ai_key", return_value="unit-test-key"), \
+                mock.patch.object(app, "transcribe_speech", side_effect=lambda *args: app.stoppable(lambda: "hi")):
+            self.assertEqual(app.ChatHelper().transcribe(b"x", "audio/ogg"), "hi")
+        self.assertFalse(getattr(app.BESIDE_TASK, "on", False))
+        with self.assertRaises(app.TaskStopped):
+            app.stop_point()  # the task itself still stops
+
     def test_typing_stops_part_way_and_a_held_button_is_let_go(self):
         self.inside_a_task()
         app.TASK_STOP.set()
@@ -1948,10 +1980,10 @@ class StopTests(unittest.TestCase):
         QGuiApplication.instance() or QGuiApplication([])
         window = mock.Mock()
         with mock.patch.object(app, "instance_name", return_value=f"motorcycle-man-unit-test-{os.getpid()}"):
-            self.assertFalse(app.show_running_app())  # none running: this one starts
+            self.assertFalse(app.tell_running_app(b"show"))  # none running: this one starts
             server = app.listen_for_another_start(window)
             try:
-                self.assertTrue(app.show_running_app())  # another start: it goes away
+                self.assertTrue(app.tell_running_app(b"show"))  # another start: it goes away
                 end = time.monotonic() + 3
                 while not window.activateWindow.called and time.monotonic() < end:
                     QCoreApplication.processEvents()
@@ -2351,6 +2383,9 @@ class ScreenViewTests(unittest.TestCase):
             self.assertEqual(reply.status, 503)
             reply.read()
             connection.close()
+            deadline = time.monotonic() + 3  # the handler lets go just after its answer is out
+            while app.PC_SOUND._value < 1 and time.monotonic() < deadline:
+                time.sleep(0.02)
         self.assertEqual(app.PC_SOUND._value, 1)
 
     def test_a_full_size_screenshot_to_keep(self):

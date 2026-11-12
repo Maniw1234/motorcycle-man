@@ -103,11 +103,13 @@ class Mux:
                 payload = read_exactly(self.link, length) if length else b""
                 if kind == OPEN:
                     self._open(stream)
-                elif kind == DATA and stream in self.streams:
-                    try:
-                        self.streams[stream].sendall(payload)
-                    except OSError:
-                        self._close(stream, tell=True)
+                elif kind == DATA:
+                    server = self.streams.get(stream)  # one look: the pump may close the stream at any moment
+                    if server is not None:
+                        try:
+                            server.sendall(payload)
+                        except OSError:
+                            self._close(stream, tell=True)
                 elif kind == CLOSE:
                     self._close(stream, tell=False)
         except (OSError, ConnectionError, struct.error):

@@ -1,6 +1,6 @@
 # "Hey Motorcycle Man": Windows' own offline speech recognizer (free, nothing to download) listens for just
 # the wake words, in a small PowerShell helper, and says when it hears them. Nothing it hears leaves the PC;
-# only the command said after the wake words is written down (by Gemini), like any spoken command.
+# only the command said after the wake words is written down, like any spoken command (see hear in motorcycle_man.py).
 import base64, logging, os, subprocess, threading
 
 LOG = logging.getLogger("motorcycle_man")

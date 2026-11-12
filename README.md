@@ -61,7 +61,9 @@ send a screenshot to your AI, which answers with the clicks and keys to do it.
 - Optional: an Android phone (Android 7 or newer) for the app. Any phone browser works for the basics.
 
 Voice commands: Gemini and ChatGPT write down what you say; with the other AIs, Windows' own speech
-recognition does it on the PC (free, but less accurate).
+recognition does it on the PC (free, but less accurate). On the phone, hold-to-talk in the app uses the
+phone's own speech recognizer (usually Google's); so does the phone page in a browser when you're away from
+home, while at home it has the PC's microphone listen.
 
 ## Running from source
 

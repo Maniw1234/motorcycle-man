@@ -40,23 +40,36 @@ class FakeMailServer:
     # An IMAP inbox and an SMTP outbox, standing in for Gmail.
     def __init__(self, password="right-password"):
         self.password, self.inbox, self.sent, self.lock = password, {}, [], threading.Lock()
+        self.busy = 0  # how many searches it answers NO to
+        self.busy_inbox = 0  # how many times it won't open the inbox
         server = self
 
         class IMAP:
             def __init__(self, host, timeout=None):
-                self.host = host
+                self.host, self.selected = host, False
 
             def login(self, user, password):
                 if (user, password) != (PC, server.password):
                     raise imaplib.IMAP4.error("[AUTHENTICATIONFAILED] Invalid credentials (Failure)")
 
             def select(self, box):
+                with server.lock:
+                    if server.busy_inbox:
+                        server.busy_inbox -= 1
+                        return "NO", [b"busy"]
+                self.selected = True
                 return "OK", [b"1"]
 
             def uid(self, command, *args):
+                if not self.selected:  # as imaplib says it
+                    raise imaplib.IMAP4.error("command UID illegal in state AUTH, only allowed in states SELECTED")
                 with server.lock:
                     uids = sorted(server.inbox)
                 if command == "search":
+                    with server.lock:
+                        if server.busy:
+                            server.busy -= 1
+                            return "NO", [None]
                     if args[1] != "ALL":
                         start = int(args[1].split()[1].split(":")[0])
                         uids = [u for u in uids if u >= start] or uids[-1:]  # IMAP always answers with the newest
@@ -107,6 +120,11 @@ class EmailCheckTests(unittest.TestCase):
         self.assertFalse(email_link.vouched_for(parse(mail(results="")), OWNER, PC))
         dkim_only = "mx.google.com; dkim=pass header.i=@gmail.com header.s=x; spf=softfail"
         self.assertTrue(email_link.vouched_for(parse(mail(results=dkim_only)), OWNER, PC))
+        for lookalike in ("mx.google.com; dkim=pass header.i=@gmail.com.evil.example header.s=x; dmarc=fail header.from=gmail.com",
+                          "mx.google.com; dkim=pass header.i=@gmail.com-evil.example",
+                          "mx.google.com; dkim=pass header.d=evilgmail.com",
+                          "mx.google.com; dmarc=pass (p=none) header.from=gmail.com.evil.example"):
+            self.assertFalse(email_link.vouched_for(parse(mail(results=lookalike)), OWNER, PC), lookalike)
 
     def test_what_an_email_says(self):
         parse = lambda raw: email.message_from_bytes(raw, policy=email.policy.default)
@@ -163,6 +181,32 @@ class EmailLinkTests(unittest.TestCase):
         self.assertEqual(self.helper.heard, [(b"audio", "audio/mp4")])
         time.sleep(0.2)
         self.assertEqual(self.helper.ran, ["pause the music", "open notepad"])  # nothing else ran
+
+    def test_a_busy_server_is_tried_again(self):
+        self.server.busy = 1
+        link = chat_link.ChatLink("email", self.helper, OWNER, slash=False)
+        transport = email_link.EmailLink(PC, "right-password", link)
+        wait = transport.stopped.wait
+        transport.stopped.wait = lambda seconds=None: wait(min(seconds, 0.05))  # no long backoff in the test
+        transport.start()
+        self.addCleanup(transport.stop)
+        self.assertTrue(wait_for(lambda: ("on", PC) in self.helper.states))
+        self.assertEqual(self.helper.states[0], ("failed", "Can't reach the mail server. Trying again..."))
+        self.server.deliver(mail("pause the music"))
+        self.assertTrue(wait_for(lambda: "Done: pause the music" in self.replies()))
+        self.assertTrue(transport.thread.is_alive())
+
+    def test_an_inbox_that_won_t_open_is_tried_again(self):
+        self.server.busy_inbox = 1
+        link = chat_link.ChatLink("email", self.helper, OWNER, slash=False)
+        transport = email_link.EmailLink(PC, "right-password", link)
+        wait = transport.stopped.wait
+        transport.stopped.wait = lambda seconds=None: wait(min(seconds, 0.05))  # no long backoff in the test
+        transport.start()
+        self.addCleanup(transport.stop)
+        self.assertTrue(wait_for(lambda: ("on", PC) in self.helper.states))  # not "bad key"
+        self.assertEqual(self.helper.states[0], ("failed", "Can't reach the mail server. Trying again..."))
+        self.assertTrue(transport.thread.is_alive())
 
     def test_a_refused_password_stops_it(self):
         transport = self.start("wrong")

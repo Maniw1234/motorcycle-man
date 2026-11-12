@@ -3,7 +3,7 @@
 # sends the code Motorcycle Man shows becomes the bot's owner, and only the owner is obeyed. Motorcycle Man
 # asks Telegram for new messages (long polling), so nothing on the PC is opened to the internet.
 # The bot's key is a secret: it is never logged or shown.
-import json, logging, secrets, threading, time, urllib.error, urllib.parse, urllib.request, uuid
+import http.client, json, logging, secrets, threading, time, urllib.error, urllib.parse, urllib.request, uuid
 
 import chat_link
 
@@ -47,6 +47,8 @@ def call(token: str, method: str, params=None, files=None, timeout=POLL_SECONDS 
     try:
         with urllib.request.urlopen(request, timeout=timeout) as reply:
             data = json.loads(reply.read())
+    except (http.client.HTTPException, ValueError) as exc:  # cut off part way, or garbled: a dropped link
+        raise ConnectionError(f"Telegram's reply was cut off ({type(exc).__name__})") from None
     except urllib.error.HTTPError as exc:  # its address holds the key, so it goes no further
         try:
             data = json.loads(exc.read())
@@ -68,6 +70,8 @@ def download(token: str, file_id: str, limit: int = FILE_LIMIT) -> bytes:
     try:
         with urllib.request.urlopen(address, timeout=60) as reply:
             data = reply.read(limit + 1)
+    except http.client.HTTPException as exc:
+        raise ConnectionError(f"Telegram's reply was cut off ({type(exc).__name__})") from None
     except urllib.error.HTTPError as exc:
         exc.close()
         raise TelegramError(f"Telegram answered {exc.code}", exc.code) from None
@@ -137,7 +141,7 @@ class TelegramBot:
                 self.stopped.wait(delay)
                 delay = min(delay * 2, 60)
                 continue
-            except (OSError, ValueError):  # no internet for now
+            except (OSError, ValueError, http.client.HTTPException):  # no internet for now (or it dropped mid-reply)
                 if not failed:
                     self.helper.changed("failed", "Can't reach Telegram. Trying again...")
                     failed = "offline"

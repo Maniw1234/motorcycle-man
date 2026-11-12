@@ -62,10 +62,6 @@ final class BluetoothTunnel {
         return local.getLocalPort();
     }
 
-    boolean isOpen() {
-        return !closed;
-    }
-
     private synchronized void send(int kind, int stream, byte[] data, int length) throws IOException {
         byte[] header = {(byte) kind, (byte) (stream >> 8), (byte) stream,
                 (byte) (length >> 24), (byte) (length >> 16), (byte) (length >> 8), (byte) length};

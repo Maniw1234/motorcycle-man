@@ -61,7 +61,7 @@ class IAudioSessionManager2(IUnknown):
     ]
 
 
-ACTIVE, EXPIRED = 1, 2  # AudioSessionState
+EXPIRED = 2  # AudioSessionState
 
 
 def _sessions():

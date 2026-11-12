@@ -7,7 +7,7 @@ if __name__ == "__main__" and "--finish-update" in sys.argv:
     # A new version taking the old one's place (see app_update.py), without the rest.
     import app_update
     sys.exit(app_update.finish_update(sys.argv))
-import array, base64, ctypes, ctypes.wintypes, difflib, html, http.client, http.server, io, ipaddress, json, logging.handlers, math, mimetypes, os, queue, random, re, secrets, shutil, socket, struct, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request, warnings, wave, webbrowser, winsound, zipfile
+import array, base64, collections, ctypes, ctypes.wintypes, difflib, hashlib, hmac, html, http.client, http.server, io, ipaddress, json, logging.handlers, math, mimetypes, os, queue, random, re, secrets, shutil, socket, struct, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request, warnings, wave, webbrowser, winsound, zipfile
 import xml.etree.ElementTree as ET
 import faulthandler
 import keep_running
@@ -19,6 +19,7 @@ import bike_rider
 import engine_sounds
 import reminders
 import routines
+import task_journal
 import wake_word
 import paint_jobs
 import chat_link
@@ -42,6 +43,7 @@ import screen_time
 import shared_lists
 import ai_providers
 import pc_capture
+import speech_pack
 from PySide6.QtCore import (
     QAbstractAnimation, QByteArray, QEasingCurve, QEvent, QObject, QPointF, QRectF, Qt, QTimer, QVariantAnimation, Signal
 )
@@ -127,6 +129,13 @@ TASK_STOP = threading.Event()
 TASK_TURNS = {"latest": 0, "running": 0}  # the newest command's number, and the running task's (0: none)
 TASK_TURNS_LOCK = threading.Lock()
 STOP_WAIT_SECONDS = 8  # how long a new command waits for the task it stopped to end
+# Why the running task was told to stop, for the task journal: "stop", "newer", "update" or "quit". The first
+# reason counts; it is cleared when the next task starts.
+STOP_WHY = {"why": ""}
+LIVE_TASK = {"id": ""}  # the journal entry of the task that is running ("" when none, or a guest's)
+# The task journal (see task_journal.py): how far each task got, so one cut off halfway can be picked up. It
+# follows APPDATA, which every test sets to a folder of its own.
+TASKS = task_journal.TaskJournal(lambda: os.path.join(app_data_dir(), "tasks.json"))
 
 
 class TaskStopped(BaseException):
@@ -135,16 +144,26 @@ class TaskStopped(BaseException):
     pass
 
 
+# A thread that writes down words said while a task runs (see execute_smart_action) works beside that task, not in
+# it: the task's stop doesn't cut its waits short.
+BESIDE_TASK = threading.local()
+
+
+def task_turn() -> int:
+    # The running task's number as this thread sees it: 0 outside a task, and on a thread working beside it.
+    return 0 if getattr(BESIDE_TASK, "on", False) else TASK_TURNS["running"]
+
+
 def stop_point():
     # Ends the running task here when it has been stopped. Outside a task it does nothing.
-    running = TASK_TURNS["running"]
+    running = task_turn()
     if running and (TASK_STOP.is_set() or TASK_TURNS["latest"] != running):
         raise TaskStopped()
 
 
 def task_sleep(seconds: float):
     # time.sleep inside a task, cut short when the task is stopped.
-    if TASK_TURNS["running"]:
+    if task_turn():
         stop_point()
         TASK_STOP.wait(max(0.0, float(seconds)))
         stop_point()
@@ -156,7 +175,7 @@ def stoppable(work, *args, budget=None, **kwargs):
     # Runs work(*args, **kwargs) in a helper thread while the task waits for it, so that a stop ends
     # the wait at once (the helper finishes by itself and its answer is dropped). Waiting longer than
     # budget seconds, if given, raises TimeoutError. Outside a task without a budget it just runs work.
-    if not TASK_TURNS["running"] and budget is None:
+    if not task_turn() and budget is None:
         return work(*args, **kwargs)
     stop_point()
     box, done = {}, threading.Event()
@@ -180,22 +199,32 @@ def stoppable(work, *args, budget=None, **kwargs):
     return box["value"]
 
 
-def new_turn() -> int:
-    # A new command's number. The task that is running, if any, stops for it.
+def new_turn(why: str = "newer") -> int:
+    # A new command's number. The task that is running, if any, stops for it; why ("stop" for a command that
+    # only stops it) goes in the task journal.
     with TASK_TURNS_LOCK:
         TASK_TURNS["latest"] += 1
         turn = TASK_TURNS["latest"]
+        if TASK_TURNS["running"] and not STOP_WHY["why"]:
+            STOP_WHY["why"] = why
     TASK_STOP.set()
     return turn
 
 
-def stop_task() -> bool:
-    # The phone's Stop button: stops the running task. False when nothing is running.
+def stop_task(why="stop") -> bool:
+    # The phone's Stop button (and the tray's; an update and Quit say "update" and "quit"): stops the running
+    # task. False when nothing is running. The tray's menu hands over a checked flag, which counts as Stop.
+    why = why if isinstance(why, str) and why else "stop"
     with TASK_TURNS_LOCK:
         if not TASK_TURNS["running"]:
             return False
+        if not STOP_WHY["why"]:
+            STOP_WHY["why"] = why
         TASK_STOP.set()
-    LOG.info("Stop pressed")
+    if why == "stop":
+        LOG.info("Stop pressed")
+    else:
+        LOG.info("Stopping the task (%s)", why)
     return True
 
 
@@ -208,6 +237,31 @@ STOP_REQUEST = re.compile(
 def is_stop_request(text) -> bool:
     # "Stop", "cancel that", "never mind": a command to stop, not something to do on the screen.
     return bool(STOP_REQUEST.fullmatch(" ".join(re.findall(r"[a-z0-9']+", str(text).lower()))))
+
+
+# "Keep going", "pick up where you left off", "finish my last task": picks up the task that stopped halfway (see
+# resume_task). Never a bare "resume" or "continue": "resume" is play/pause, and "find my resume" is a file.
+RESUME_REQUEST = re.compile(
+    r"(?:(?:ok|okay|hey|motorcycle man|please|now|yes|so)\s+)*"
+    r"(?:keep going|carry on|pick (?:it |that )?(?:back )?up(?: where (?:you|we) left off)?"
+    r"|(?:resume|continue|finish) (?:the |my |that |your )?(?:last |paused )?task"
+    r"|(?:continue|go on|pick up) where (?:you|we) left off)"
+    r"(?: (?:please|now|motorcycle man))*")
+# "Forget it", "never mind", "forget the paused task": drops that task. Only while nothing runs: then most of
+# these are a stop (see is_stop_request).
+FORGET_REQUEST = re.compile(
+    r"(?:(?:ok|okay|please|no)\s+)*(?:forget (?:it|that|about it|the (?:paused |last )?task)|never ?mind"
+    r"|don't (?:resume|finish) (?:it|that))(?: (?:please|now))*")
+
+
+def is_resume_request(text) -> bool:
+    return bool(RESUME_REQUEST.fullmatch(" ".join(re.findall(r"[a-z0-9']+", str(text).lower()))))
+
+
+def is_forget_request(text) -> bool:
+    return bool(FORGET_REQUEST.fullmatch(" ".join(re.findall(r"[a-z0-9']+", str(text).lower()))))
+
+
 TASK_STATUS = {"running": False, "status": "Status: Ready!", "nx": 0.5, "ny": 0.4, "confirm": None, "history": 0,
                "mood": "idle", "say": "", "notice": None}
 CONFIRM_LOCK = threading.Lock()
@@ -290,9 +344,16 @@ PENDING_PAIR = {"id": None, "event": None, "allowed": False, "match": "", "clien
 PAIR_REST = {"until": 0.0}  # time.monotonic() when phones may ask again
 
 
-def hello_info() -> dict:
+def hello_info(nonce: str = "", at: str = "") -> dict:
     # Version 2 takes the code typed on the phone, /pair_code.
-    return {"app": "motorcycle-man", "name": socket.gethostname(), "version": 2}
+    info = {"app": "motorcycle-man", "name": socket.gethostname(), "version": 2}
+    if PHONE_SESSION_TOKEN and re.fullmatch(r"[0-9a-f]{32}", nonce or ""):
+        # Proof that this PC holds the phone link's secret, without telling it: a phone looking for its PC at a
+        # new address checks this before it sends the secret there. The address this PC was reached at is part
+        # of it, so another computer on the Wi-Fi can't pass this answer on as its own.
+        info["proof"] = hmac.new(PHONE_SESSION_TOKEN.encode("utf-8"),
+                                 f"motorcycle-man-hello|{nonce}|{at}".encode("utf-8"), hashlib.sha256).hexdigest()
+    return info
 
 
 def clean_device_name(text) -> str:
@@ -871,9 +932,12 @@ def keep_awake_for_phone():
         time.sleep(5)
 
 
-def wake_screen():
-    # A command may arrive while the screen is dark; Motorcycle Man has to see the screen to work on it.
-    _kernel32_power.SetThreadExecutionState(ES_DISPLAY_REQUIRED)
+def wake_screen(on: bool = True):
+    # A command may arrive while the screen is dark; Motorcycle Man has to see the screen to work on it. Until
+    # wake_screen(False) at its end, the task's thread also keeps the PC from sleeping halfway through. Windows
+    # ties this to the thread, so the phone's keep-awake (update_keep_awake) is left as it is.
+    _kernel32_power.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED if on
+                                            else ES_CONTINUOUS)
 
 
 def resource_path(name: str) -> str:
@@ -888,12 +952,7 @@ def app_data_dir() -> str:
 
 
 def key_file_path() -> str:
-    path = os.path.join(app_data_dir(), "keys.json")
-    old_path = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "Googly", "keys.json")
-    # Keep the Gemini key saved under the app's old name.
-    if not os.path.exists(path) and os.path.exists(old_path):
-        shutil.copy2(old_path, path)
-    return path
+    return os.path.join(app_data_dir(), "keys.json")
 
 
 def saved_key(name: str) -> str:
@@ -1048,18 +1107,40 @@ def install_update(bridge):
     if not release or UPDATE["busy"]:
         return
     UPDATE["busy"] = True
+    holding, stopping = False, None
     try:
         bridge.say_sig.emit("Downloading the update...", 0)
         path = app_update.download_update(release, updates_folder())
+        # A task that is running stops first and stays in the task journal, to be picked up after the update
+        # ("keep going"); no new one starts while the installer takes over. It is noted as cut off by the update
+        # only once the installer has started (it waits for this one to close).
+        stopping = LIVE_TASK["id"]
+        stop_task("update")
+        holding = TASK_LOCK.acquire(timeout=STOP_WAIT_SECONDS)
         app_update.start_install(path, sys.executable, os.getpid())
+        journal_call(TASKS.recover, "update")
         LOG.info("Installing %s", release["version"])
         bridge.say_sig.emit("Updating... I'll be right back.", 4000)
         bridge.update_quit_sig.emit()
     except (app_update.UpdateError, OSError) as exc:
         LOG.warning("The update didn't install: %s", exc)
+        if stopping is not None:
+            update_failed(stopping)
         bridge.say_sig.emit(f"The update didn't work: {exc}", 8000)
     finally:
+        if holding:
+            TASK_LOCK.release()
         UPDATE["busy"] = False
+
+
+def update_failed(task_id: str):
+    # The installer didn't start: the task the update stopped says "The update didn't work.", not "I updated
+    # myself." A task still stopping notes that when it ends; one already parked is put right.
+    with TASK_TURNS_LOCK:
+        if STOP_WHY["why"] == "update":
+            STOP_WHY["why"] = "update_failed"
+    if task_id and (journal_call(TASKS.get, task_id) or {}).get("why") == "update":
+        journal_call(TASKS.relabel, task_id, "update_failed")
 
 
 def show_notice(text: str, ms: int, overlay, tray):
@@ -1303,10 +1384,14 @@ _user32_windows.GetForegroundWindow.restype = ctypes.wintypes.HWND
 _user32_windows.GetClassNameW.argtypes = (ctypes.wintypes.HWND, ctypes.wintypes.LPWSTR, ctypes.c_int)
 _user32_windows.GetWindowTextW.argtypes = (ctypes.wintypes.HWND, ctypes.wintypes.LPWSTR, ctypes.c_int)
 TERMINAL_WINDOW_CLASSES = {"ConsoleWindowClass", "CASCADIA_HOSTING_WINDOW_CLASS", "mintty", "VirtualConsoleClass"}
+TERMINAL_PROGRAMS = {"cmd.exe", "powershell.exe", "pwsh.exe", "windowsterminal.exe", "conhost.exe", "openconsole.exe",
+                     "wsl.exe", "bash.exe", "mintty.exe"}
+SEARCH_PROGRAMS = {"searchhost.exe", "searchapp.exe", "startmenuexperiencehost.exe"}
 
 
 def foreground_window_kind():
-    # Keystrokes sent to a terminal or the Run box can run commands, so Motorcycle Man asks first.
+    # Keystrokes sent to a terminal, the Run box or File Explorer's address bar can run commands, so Motorcycle
+    # Man asks first. The program a window belongs to counts too: titles differ by language.
     hwnd = _user32_windows.GetForegroundWindow()
     if not hwnd:
         return None
@@ -1314,12 +1399,16 @@ def foreground_window_kind():
     title = ctypes.create_unicode_buffer(256)
     _user32_windows.GetClassNameW(hwnd, class_name, 256)
     _user32_windows.GetWindowTextW(hwnd, title, 256)
-    if class_name.value in TERMINAL_WINDOW_CLASSES:
+    program = window_process_name(hwnd)
+    if class_name.value in TERMINAL_WINDOW_CLASSES or program in TERMINAL_PROGRAMS:
         return "terminal"
-    if class_name.value == "#32770" and title.value == "Run":
-        return "Run box"
-    if class_name.value == "Windows.UI.Core.CoreWindow" and title.value in ("Search", "Start"):
+    if program == "taskmgr.exe" or (class_name.value == "#32770" and (title.value == "Run" or program == "explorer.exe")):
+        return "Run box"  # Task Manager's "Run new task" too
+    if program in SEARCH_PROGRAMS or (class_name.value == "Windows.UI.Core.CoreWindow"
+                                      and title.value in ("Search", "Start")):
         return "Start search"
+    if class_name.value in ("CabinetWClass", "ExploreWClass"):
+        return "File Explorer"
     return None
 
 
@@ -1641,14 +1730,19 @@ def sound_level(chunk: bytes) -> float:
 
 def loud_moments(levels) -> list:
     # Which of the microphone's loudness readings could be someone talking: well above the room's own
-    # sound (a fan, music), which is taken from its quieter readings. The microphone gives pure
-    # silence for its first half second while it starts; counted as the room, that made a humming
-    # room look like someone talking.
+    # sound (a fan, music). The microphone gives pure silence for its first half second while it starts;
+    # counted as the room, that made a humming room look like someone talking. The room is the quieter of the
+    # quieter readings overall and the first readings with sound, before most people start talking: taken from the
+    # readings overall only, a long hold with talking nearly all the way through set the bar above its own speech,
+    # and the hold was thrown away as "nobody talked". The bar also never goes above 1200, below ordinary speech
+    # near the microphone (1500-4000).
     start = next((i for i, level in enumerate(levels) if level > 5), len(levels))
     steady = sorted(levels[start:])
     if len(steady) < 4:
         return []
-    loud = max(300.0, steady[len(steady) // 5] * 2.5)
+    opening = sorted([level for level in levels[start:] if level > 5][:6])
+    room = min(steady[len(steady) // 5], opening[len(opening) // 2]) if opening else steady[len(steady) // 5]
+    loud = max(300.0, min(room * 2.5, 1200.0))
     return [i for i in range(start, len(levels)) if levels[i] > loud]
 
 
@@ -1667,61 +1761,177 @@ def speech_runs(levels, readings=3) -> list:
     return runs
 
 
-def speech_ended(levels, chunk_seconds=0.05, quiet_seconds=0.9) -> bool:
-    # Whether someone has talked and then been quiet for quiet_seconds (a reading every chunk_seconds).
+def quiet_after(runs, chunk_seconds=0.05) -> float:
+    # How long a quiet ends the talking: 0.9 s after a short command, longer after longer talking (up to 1.5 s
+    # after 4 s), when people stop to think in the middle of a sentence.
+    talked = (runs[-1][1] - runs[0][0] + 1) * chunk_seconds
+    return 0.9 if talked < 1.0 else round(min(1.5, 0.9 + 0.2 * (talked - 1.0)), 3)
+
+
+def speech_ended(levels, chunk_seconds=0.05, quiet_seconds=None) -> bool:
+    # Whether someone has talked and then been quiet for quiet_seconds (by default as long as quiet_after says),
+    # with a reading every chunk_seconds.
     runs = speech_runs(levels)
-    return bool(runs) and (len(levels) - 1 - runs[-1][1]) * chunk_seconds >= quiet_seconds
+    if not runs:
+        return False
+    quiet = quiet_after(runs, chunk_seconds) if quiet_seconds is None else quiet_seconds
+    return round((len(levels) - 1 - runs[-1][1]) * chunk_seconds, 3) >= quiet
+
+
+def tidy_recording(wav_bytes: bytes, levels, chunk_seconds=0.05, margin_seconds=0.3) -> bytes:
+    # A recording cut to its talking, with 0.3 s either side, and made louder when it is quiet: its loudest moment
+    # is brought up to about half of full scale (-6 dBFS), at most 8 times louder, so it never clips. A recording
+    # that is loud enough already isn't made quieter. Anything that isn't 16-bit mono WAV, or has no talking in it,
+    # comes back as it was.
+    try:
+        with wave.open(io.BytesIO(wav_bytes)) as w:
+            if w.getnchannels() != 1 or w.getsampwidth() != 2:
+                return wav_bytes
+            rate, frames = w.getframerate(), w.readframes(w.getnframes())
+    except (wave.Error, EOFError, ValueError, TypeError):
+        return wav_bytes
+    runs = speech_runs(list(levels))
+    if not runs or not frames:
+        return wav_bytes
+    reading, margin = int(rate * chunk_seconds) * 2, round(margin_seconds / chunk_seconds)
+    first = max(0, runs[0][0] - margin) * reading
+    last = min(len(frames) // 2 * 2, (runs[-1][1] + 1 + margin) * reading)
+    samples = array.array("h", frames[first:last])
+    if not samples:
+        return wav_bytes
+    peak = max(max(samples), -min(samples))
+    gain = min(8.0, 16384.0 / peak) if peak else 1.0
+    if gain > 1.05:  # |sample| <= peak, so |sample * gain| <= 16384: nothing can clip
+        samples = array.array("h", [int(s * gain) for s in samples])
+    out = io.BytesIO()
+    with wave.open(out, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(samples.tobytes())
+    return out.getvalue()
+
+
+def recording_levels(wav_bytes: bytes, chunk_seconds=0.05) -> list:
+    # The loudness readings of a 16-bit mono WAV recording, like MicRecorder's; [] for anything else.
+    try:
+        with wave.open(io.BytesIO(wav_bytes)) as w:
+            if w.getnchannels() != 1 or w.getsampwidth() != 2:
+                return []
+            rate, frames = w.getframerate(), w.readframes(w.getnframes())
+    except (wave.Error, EOFError, ValueError, TypeError):
+        return []
+    step = int(rate * chunk_seconds) * 2
+    return [sound_level(frames[i:i + step]) for i in range(0, len(frames), step)] if step else []
+
+
+class _Recording:
+    # One recording: its number, what it heard, and the switches its thread answers to.
+    def __init__(self, session: int, max_seconds: float):
+        self.session, self.max_seconds = session, max_seconds
+        self.sound, self.levels, self.error = bytearray(), [], ""
+        self.stop, self.until_quiet, self.done, self.hearing = (threading.Event(), threading.Event(),
+                                                                threading.Event(), threading.Event())
+        self.started, self.quiet_by, self.capped, self.handed = time.monotonic(), None, False, False
+        self.thread = None
 
 
 class MicRecorder:
     # Records the PC's microphone while someone talks to Motorcycle Man from the phone page (in BlueStacks,
-    # or a phone that can't listen itself). It records on a thread of its own: Windows' simpler MCI
-    # recording only answers the thread that started it, and the phone's "start" and "stop" arrive
-    # on different threads, so every recording came back empty. After a tap on the face it also
-    # hears when the talking stops.
+    # or a phone that can't listen itself), and for the wake words and Ctrl+Alt+M. It records on a thread of its
+    # own: Windows' simpler MCI recording only answers the thread that started it, and the phone's "start" and
+    # "stop" arrive on different threads, so every recording came back empty. After a tap on the face it also
+    # hears when the talking stops. Each recording has a number (start returns it): the newest start wins the
+    # microphone, and a stop with an older number gets nothing, so the phone and the wake words can't end or
+    # take each other's recordings (a second start used to empty the first one's sound, and its stop then
+    # ran the second one's words).
     RATE, CHUNK_SECONDS = 16000, 0.05
-    MAX_SECONDS = 15  # the longest command
+    HOLD_SECONDS = 120  # the longest hold on the phone (its page says "10 seconds left" at 110 s); it was 15 s
+    TAP_SECONDS = 30  # the longest command after a tap, the wake words or Ctrl+Alt+M
     WAIT_FOR_SPEECH_SECONDS = 6  # after a tap, how long it waits for someone to start talking
+    BUFFERS = 40  # of 50 ms each: Windows keeps recording into them for 2 s while Python is busy (8 lost sound)
+    SOUND_LEVEL = 5  # above this the microphone is delivering sound; it gives pure silence while it starts
+    SILENT_SECONDS = 1.5  # this long without any sound: the microphone is muted or unplugged
 
     def __init__(self):
         self._lock = threading.Lock()
-        self._thread = None
-        self._stop = threading.Event()
-        self._until_quiet = threading.Event()
-        self._done = threading.Event()
-        self._sound, self.levels, self.error = bytearray(), [], ""
+        self._now = None  # the newest recording
+        self._sessions = 0
+        self.levels, self.error, self.capped = [], "", False  # about the recording last handed over
 
-    def start(self):
+    def start(self, max_seconds=None) -> int:
+        # Starts a new recording (ending the one before, whose stop then gives nothing) and returns its number.
         with self._lock:
-            self._end_recording()
-            self._stop.clear()
-            self._until_quiet.clear()
-            self._done.clear()
-            self._sound, self.levels, self.error = bytearray(), [], ""
-            self._thread = threading.Thread(target=self._record, daemon=True)
-            self._thread.start()
+            if self._now is not None:
+                self._end(self._now)
+            self._sessions += 1
+            take = _Recording(self._sessions, float(max_seconds or self.HOLD_SECONDS))
+            take.thread = threading.Thread(target=self._record, args=(take,), name="microphone", daemon=True)
+            self._now = take
+            take.thread.start()
+            return take.session
 
-    def stop(self, until_quiet=False) -> bytes:
-        # The recording as a WAV file; with until_quiet (a tap) it first waits for the talking to end.
-        if until_quiet and self._thread is not None:
-            self._until_quiet.set()
-            self._done.wait(self.MAX_SECONDS + 2)
+    def stop(self, session=None, until_quiet=False) -> bytes:
+        # The recording as a WAV file; with until_quiet (a tap) it first waits for the talking to end. b"" when it
+        # was replaced by a newer recording, was handed over already, or has no sound. session None: the newest.
         with self._lock:
-            self._end_recording()
-            if not self._sound:
+            take = self._now
+            if take is None or take.handed or (session is not None and take.session != session):
                 return b""
-            out = io.BytesIO()
-            with wave.open(out, "wb") as w:
-                w.setnchannels(1)
-                w.setsampwidth(2)
-                w.setframerate(self.RATE)
-                w.writeframes(bytes(self._sound))
-            self._sound = bytearray()  # handed over once: a second stop hasn't heard anything new
-            return out.getvalue()
+            if until_quiet:
+                take.quiet_by = time.monotonic() + self.TAP_SECONDS
+                take.until_quiet.set()
+        if until_quiet:
+            take.done.wait(max(0.0, min(take.started + take.max_seconds, take.quiet_by) - time.monotonic()) + 2)
+        with self._lock:
+            if take is not self._now or take.handed:
+                return b""  # a newer recording took the microphone while this one waited for the quiet
+            take.handed = True
+            self._end(take)
+            self.levels, self.error, self.capped = take.levels, take.error, take.capped
+            sound, take.sound = bytes(take.sound), bytearray()  # handed over once: a second stop gets nothing
+        if not sound:
+            return b""
+        out = io.BytesIO()
+        with wave.open(out, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(self.RATE)
+            w.writeframes(sound)
+        return out.getvalue()
 
-    def stop_listening(self):
-        # The phone's second tap: done talking.
-        self._stop.set()
+    def stop_listening(self, session=None):
+        # The phone's second tap, or Ctrl+Alt+M again: done talking. session None: the newest recording.
+        take = self._now
+        if take is not None and (session is None or take.session == session):
+            take.stop.set()
+
+    def replaced(self, session) -> bool:
+        # Whether a newer recording started after this one.
+        return self._sessions > session
+
+    def in_use(self, session) -> bool:
+        # Whether that recording still has the microphone: the newest, not handed over, and still recording.
+        take = self._now
+        return bool(session) and take is not None and take.session == session and not take.handed and not take.done.is_set()
+
+    @property
+    def hearing(self) -> threading.Event:
+        # Set once the newest recording gets real sound from the microphone: it is ready.
+        take = self._now
+        return take.hearing if take is not None else threading.Event()
+
+    def wait_until_hearing(self, session, timeout=1.0) -> tuple:
+        # (whether the microphone is delivering sound, why it can't): what /hold_start tells the phone, whose page
+        # says "I'm listening" only then. (False, "") for a recording that was replaced.
+        take = self._now
+        if take is None or take.session != session:
+            return False, ""
+        end = time.monotonic() + timeout
+        while not take.hearing.wait(0.02):
+            if take.done.is_set() or time.monotonic() >= end:
+                break
+        return take.hearing.is_set(), take.error
 
     @property
     def heard_speech(self) -> bool:
@@ -1729,49 +1939,65 @@ class MicRecorder:
         # words in the sound of typing, and Motorcycle Man went and searched the web for them.
         return bool(speech_runs(self.levels))
 
-    def _end_recording(self):
-        if self._thread is not None:
-            self._stop.set()
-            self._thread.join(3)
-            self._thread = None
+    @property
+    def silent(self) -> bool:
+        # Whether the last recording had no sound at all for long enough to tell: a muted or unplugged microphone.
+        return len(self.levels) * self.CHUNK_SECONDS >= self.SILENT_SECONDS and max(self.levels) <= self.SOUND_LEVEL
 
-    def _take(self, header):
-        chunk = ctypes.string_at(header.lpData, header.dwBytesRecorded)
-        self._sound += chunk
-        self.levels.append(sound_level(chunk))
+    def _end(self, take):
+        take.stop.set()
+        if take.thread is not None and take.thread is not threading.current_thread():
+            take.thread.join(3)
 
-    def _record(self):
+    def _over(self, take) -> bool:
+        # Whether the recording has reached its limit: HOLD_SECONDS for a hold, TAP_SECONDS after a tap.
+        now = time.monotonic()
+        if now - take.started < take.max_seconds and (take.quiet_by is None or now < take.quiet_by):
+            return False
+        take.capped = True
+        LOG.info("The microphone stopped at its %d s limit", round(now - take.started))
+        return True
+
+    def _keep(self, take, chunk: bytes) -> bool:
+        # Adds a piece of sound to the recording; True when, after a tap, the talking has ended (or nobody started).
+        level = sound_level(chunk)
+        take.sound += chunk
+        take.levels.append(level)
+        if level > self.SOUND_LEVEL:
+            take.hearing.set()
+        return take.until_quiet.is_set() and (speech_ended(take.levels, self.CHUNK_SECONDS) or (
+            len(take.levels) * self.CHUNK_SECONDS > self.WAIT_FOR_SPEECH_SECONDS and not speech_runs(take.levels)))
+
+    def _record(self, take):
         handle = ctypes.c_void_p()
         size = int(self.RATE * 2 * self.CHUNK_SECONDS)
-        buffers = [ctypes.create_string_buffer(size) for _ in range(8)]
+        buffers = [ctypes.create_string_buffer(size) for _ in range(self.BUFFERS)]
         headers = [WAVEHDR(ctypes.cast(b, ctypes.c_void_p), size) for b in buffers]
         header_size = ctypes.sizeof(WAVEHDR)
-        started, turn = time.monotonic(), 0  # turn: Windows fills the buffers in the order they were given
+        turn = 0  # Windows fills the buffers in the order they were given
         try:
             fmt = WAVEFORMATEX(1, 1, self.RATE, self.RATE * 2, 2, 16, 0)  # 16-bit mono PCM
             result = _winmm.waveInOpen(ctypes.byref(handle), WAVE_MAPPER, ctypes.byref(fmt), 0, 0, 0)
             if result:
-                self.error = f"Windows couldn't open the microphone (error {result})."
-                LOG.warning(self.error)
+                take.error = f"Windows couldn't open the microphone (error {result})."
+                LOG.warning(take.error)
                 handle = ctypes.c_void_p()
                 return
             for header in headers:
                 _winmm.waveInPrepareHeader(handle, ctypes.byref(header), header_size)
                 _winmm.waveInAddBuffer(handle, ctypes.byref(header), header_size)
             _winmm.waveInStart(handle)
-            while not self._stop.is_set() and time.monotonic() - started < self.MAX_SECONDS:
+            while not take.stop.is_set() and not self._over(take):
                 header = headers[turn]
                 if not header.dwFlags & WHDR_DONE:
                     time.sleep(0.01)
                     continue
-                self._take(header)
+                finished = self._keep(take, ctypes.string_at(header.lpData, header.dwBytesRecorded))
                 header.dwFlags &= ~WHDR_DONE
                 header.dwBytesRecorded = 0
                 _winmm.waveInAddBuffer(handle, ctypes.byref(header), header_size)
                 turn = (turn + 1) % len(headers)
-                if self._until_quiet.is_set() and (speech_ended(self.levels, self.CHUNK_SECONDS) or (
-                        len(self.levels) * self.CHUNK_SECONDS > self.WAIT_FOR_SPEECH_SECONDS
-                        and not speech_runs(self.levels))):
+                if finished:
                     break  # done talking, or nobody started
         except Exception:
             LOG.warning("Recording the microphone failed", exc_info=True)
@@ -1781,14 +2007,31 @@ class MicRecorder:
                 for i in range(len(headers)):
                     header = headers[(turn + i) % len(headers)]
                     if header.dwFlags & WHDR_DONE and header.dwBytesRecorded:
-                        self._take(header)
+                        self._keep(take, ctypes.string_at(header.lpData, header.dwBytesRecorded))
                 for header in headers:
                     _winmm.waveInUnprepareHeader(handle, ctypes.byref(header), header_size)
                 _winmm.waveInClose(handle)
-            self._done.set()
+            take.done.set()
 
 
 MIC_RECORDER = MicRecorder()
+# A press on the phone's helmet that the PC hears about, paired by the page's talk key (see hold_start_request): the
+# press the PC's microphone records for (its key, the recording's number, whether it put "Listening" in the status
+# and the status before that), the keys of the presses that ended (a /hold_start arriving after its /hold_stop
+# records nothing, and a second /hold_stop runs nothing), the keys of the presses dropped (a tap still waiting for
+# the quiet then runs nothing), the keys of the presses whose words came back unrun (their Send it runs them once),
+# the recent presses' recordings, and the long-hold timer.
+PHONE_TALK = {"key": "", "session": 0, "listening": False, "before": "", "ended": collections.deque(maxlen=32),
+              "started": collections.deque(maxlen=32), "dropped": collections.deque(maxlen=32),
+              "checked": collections.deque(maxlen=32), "timer": None}
+PHONE_TALK_LOCK = threading.Lock()
+TALK_KEY = re.compile(r"[0-9a-f]{8}-[0-9]{1,9}")  # the page's key (8 random hex digits) and the press's number
+LEGACY_TALKS = {"made": 0}  # keys made here for presses from pages loaded before talk keys ("legacy-1"...)
+TALK_KEY_PROBLEM = "That didn't go through. Reload this page and try again."  # for a page that sent a broken key
+TALK_WARN_SECONDS = 110  # "10 seconds left" in the status, as on the phone
+TALK_GIVE_UP_SECONDS = 40  # after that warning: a press whose page never said it ended is let go
+PC_MIC_NOTHING = "I didn't catch that. Tap the helmet and speak again, or tap Type."
+PC_MIC_MUTED = "The PC's microphone is muted or silent. Check it in Windows sound settings."
 
 
 def list_open_windows():
@@ -1936,7 +2179,7 @@ BUILTIN_APP_TARGETS = {
 }
 
 
-_START_APPS = {"at": -1e9, "apps": {}}
+_START_APPS = {"at": -1e9, "apps": {}, "names": {}}  # names: lowercase name -> the name as the Start menu shows it
 
 
 def discover_start_apps() -> dict:
@@ -1944,7 +2187,7 @@ def discover_start_apps() -> dict:
     # and Notepad apps, which have no shortcut file. Asking Windows takes ~1 s, so the list is kept 5 min.
     if time.monotonic() - _START_APPS["at"] < 300:
         return _START_APPS["apps"]
-    apps = {}
+    apps, names = {}, {}
     try:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command",
@@ -1955,9 +2198,10 @@ def discover_start_apps() -> dict:
             name, app_id = str(entry.get("Name") or "").strip(), str(entry.get("AppID") or "").strip()
             if name and app_id:
                 apps[name.lower()] = app_id
+                names[name.lower()] = name  # for the ears' hints, which want "Spotify" (see hearing_words)
     except Exception:
         LOG.warning("Could not list the Start menu apps", exc_info=True)
-    _START_APPS.update(at=time.monotonic(), apps=apps)
+    _START_APPS.update(at=time.monotonic(), apps=apps, names=names)
     return apps
 
 
@@ -2066,6 +2310,8 @@ PHONE_PAGE = r"""<!DOCTYPE html>
   .chip[data-state="listening"] .dot { background: var(--sky); box-shadow: 0 0 10px var(--sky); animation: pulse .8s infinite; }
   .chip[data-state="offline"] .dot { background: var(--rose); box-shadow: 0 0 10px var(--rose); }
   .chip[data-state="sleeping"] .dot { background: var(--violet); box-shadow: none; }
+  .chip[data-state="paused"] .dot { background: var(--sun); box-shadow: 0 0 10px var(--sun); }
+  .chip[data-state="stuck"] .dot { background: var(--rose); box-shadow: 0 0 10px var(--rose); }
   .actions { display: flex; gap: 8px; flex: none; }
   .icon-btn { position: relative; width: 42px; height: 42px; border-radius: 50%; border: 1px solid var(--line);
               background: var(--glass); display: inline-grid; place-items: center; padding: 0; cursor: pointer; }
@@ -2153,13 +2399,15 @@ PHONE_PAGE = r"""<!DOCTYPE html>
                            background: var(--mint); box-shadow: 0 0 0 2px var(--bg-2); }
   @media (max-width: 440px) { .icon-btn.wide { width: 42px; padding: 0; justify-content: center; } .icon-btn.wide span { display: none; } }
   #stage { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
-           gap: 24px; padding: 78px 22px 48px; }
+           gap: 24px; padding: 78px 22px 48px; -webkit-touch-callout: none; }
   .face { position: relative; width: min(66vmin, 400px); aspect-ratio: 1 / 1; cursor: pointer; touch-action: none;
           animation: float 5s ease-in-out infinite; }
   .face::before { content: ''; position: absolute; inset: -16%; border-radius: 50%; z-index: -1; transition: background .3s; }
   .face-svg { display: block; width: 100%; height: 100%; overflow: visible; filter: drop-shadow(0 16px 26px rgba(0,0,0,.45));
               transition: transform .35s cubic-bezier(.3,1.7,.5,1); }
-  .face.held .face-svg { transform: scale(1.06); }
+  .face.held .face-svg { transform: scale(calc(1.06 + var(--voice, 0) * .06)); }
+  .face.warming::before { animation: warm 1.1s ease-in-out infinite; }
+  .face.gap .face-svg { animation: gapbreath .9s ease-in-out infinite; }
   .face[data-mood="happy"] .face-svg, .face[data-mood="laughing"] .face-svg,
   .face[data-mood="opening"] .face-svg { animation: bounce .7s ease 2; }
   .face[data-mood="thinking"] .face-svg, .face[data-mood="researching"] .face-svg { animation: tilt 2.6s ease-in-out infinite; }
@@ -2212,6 +2460,46 @@ PHONE_PAGE = r"""<!DOCTYPE html>
              color: #FDA4AF; font-size: 15px; font-weight: 700; cursor: pointer; }
   #stopBtn.on { display: inline-flex; animation: pop .28s cubic-bezier(.3,1.6,.5,1); }
   #stopBtn svg { width: 13px; height: 13px; }
+  /* Under the chip, centred with margin rather than translateX: @keyframes pop sets transform. */
+  #resumeBar { position: fixed; left: 0; right: 0; margin: 0 auto; z-index: 19; width: min(92vw, 420px);
+               top: calc(max(14px, env(safe-area-inset-top)) + 54px); display: none; flex-direction: column; gap: 10px;
+               padding: 12px 12px 12px 16px; border-radius: 18px; background: #121A3A;
+               border: 1px solid rgba(255,200,61,.5); box-shadow: 0 14px 34px rgba(0,0,0,.45); }
+  #resumeBar.on { display: flex; animation: pop .28s cubic-bezier(.3,1.6,.5,1); }
+  #resumeBar.stuck { border-color: rgba(251,113,133,.55); }
+  #resumeTitle, #resumeWhy { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #resumeTitle { font-size: 14px; font-weight: 700; line-height: 1.35; }
+  #resumeWhy { margin-top: 2px; font-size: 12.5px; color: var(--muted); }
+  #resumeBar .rs-row { flex: none; display: flex; justify-content: flex-end; gap: 8px; }
+  #resumeBar .rs-row button { min-height: 42px; padding: 0 16px; border-radius: 21px; font-size: 14px; font-weight: 700;
+                              cursor: pointer; }
+  #resumeBar .rs-row button:active { transform: scale(.96); }
+  #resumeGo { border: none; background: var(--mint); color: #052E1F; }
+  #resumeDrop { border: 1px solid var(--line); background: var(--glass); color: var(--ink); }
+  @media (orientation: landscape) {
+    #resumeBar { flex-direction: row; align-items: center; width: min(86vw, 600px); }
+    #resumeBar .rs-words { flex: 1; min-width: 0; }
+  }
+  #sendHeardBtn { position: fixed; left: 50%; bottom: max(96px, calc(env(safe-area-inset-bottom) + 82px)); z-index: 20;
+                  transform: translateX(-50%); display: none; align-items: center; gap: 8px; padding: 0 24px; min-height: 48px;
+                  border-radius: 24px; border: 1px solid rgba(52,211,153,.55); background: rgba(52,211,153,.16);
+                  color: #6EE7B7; font-size: 15px; font-weight: 700; cursor: pointer; }
+  #sendHeardBtn.on { display: inline-flex; animation: pillpop .28s cubic-bezier(.3,1.6,.5,1); }
+  #sendHeardBtn svg { width: 15px; height: 15px; }
+  #voiceModal .sheet { text-align: center; }
+  #voiceHold { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+               width: 132px; height: 132px; margin: 4px auto 14px; border-radius: 50%; border: 2px solid rgba(96,165,250,.6);
+               background: radial-gradient(circle at 50% 38%, rgba(96,165,250,.32), rgba(96,165,250,.08)); color: var(--ink);
+               font: inherit; font-size: 14px; font-weight: 700; cursor: pointer; touch-action: none; -webkit-touch-callout: none;
+               transition: transform .3s cubic-bezier(.3,1.7,.5,1), box-shadow .3s; }
+  #voiceHold svg { width: 34px; height: 34px; }
+  #voiceHold.held { transform: scale(calc(1.04 + var(--voice, 0) * .08));
+                    box-shadow: 0 0 0 10px rgba(96,165,250,.16), 0 0 34px rgba(96,165,250,.45); }
+  #voiceHold.warming { animation: warm 1.1s ease-in-out infinite; }
+  #voiceHold.gap { animation: gapbreath .9s ease-in-out infinite; }
+  #voiceTip { margin: 0 0 10px; color: var(--muted); font-size: 13px; line-height: 1.45; }
+  #voiceHeard { min-height: 24px; font-size: 18px; font-weight: 700; line-height: 1.35; overflow-wrap: anywhere; }
+  #voiceHow { min-height: 18px; margin-top: 6px; color: var(--muted); font-size: 12.5px; }
   @media (orientation: landscape) {
     #stage { flex-direction: row; gap: 36px; padding: 72px 44px 36px; }
     .face { width: min(62vh, 380px); }
@@ -2490,6 +2778,9 @@ PHONE_PAGE = r"""<!DOCTYPE html>
   @keyframes tremble { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-.8px); } 75% { transform: translateX(.8px); } }
   @keyframes plead { 0%, 100% { transform: rotate(-2deg) scale(1); } 50% { transform: rotate(2deg) scale(1.03); } }
   @keyframes pop { from { transform: scale(.92); opacity: .4; } to { transform: scale(1); opacity: 1; } }
+  @keyframes warm { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
+  @keyframes gapbreath { 0%, 100% { transform: scale(1.06); } 50% { transform: scale(1.02); } }
+  @keyframes pillpop { from { transform: translateX(-50%) scale(.92); opacity: .4; } to { transform: translateX(-50%) scale(1); opacity: 1; } }
 </style>
 </head>
 <body>
@@ -2510,6 +2801,8 @@ PHONE_PAGE = r"""<!DOCTYPE html>
 <div id="hint">Tap the face and talk &middot; or tap the keyboard to type</div>
 <div id="installTip"><img src="/app-icon.png" alt=""><span>Put Motorcycle Man on your home screen: tap <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3M8 7l4-4 4 4M5 11v9h14v-9"/></svg> Share, then <b>Add to Home Screen</b>.</span><button class="btn btn-ghost" onclick="closeInstallTip()" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
 <button id="stopBtn" onclick="stopTask()" aria-label="Stop what Motorcycle Man is doing"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3" fill="currentColor"/></svg><span>Stop</span></button>
+<div id="resumeBar" role="status" aria-live="polite"><div class="rs-words"><div id="resumeTitle"></div><div id="resumeWhy"></div></div><div class="rs-row"><button id="resumeDrop" onclick="forgetPaused()">Forget it</button><button id="resumeGo" onclick="resumeTask()">Resume task</button></div></div>
+<button id="sendHeardBtn" onclick="sendHeardNow()" aria-label="Send what I heard to Motorcycle Man"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg><span>Send it</span></button>
 <div id="screenView">
   <div id="screenStage"><span id="screenWait">Connecting to the PC's screen...</span>
     <canvas id="screenCanvas" aria-label="The PC's screen"></canvas>
@@ -2606,6 +2899,7 @@ PHONE_PAGE = r"""<!DOCTYPE html>
     <div class="remote-head"><h3>Settings</h3><span id="prefsSay"></span></div>
     <div class="send-part">THIS PHONE</div>
     <label class="switch-row pref"><span>Spoken replies<small>When you talk, answers come out loud on this phone</small></span><input type="checkbox" id="prefTalkBack" onchange="toggleTalkBack()"></label>
+    <button class="pref-link" onclick="fromPrefs(openVoiceCheck)"><span>Test my voice<small>Say something and see what I hear. Nothing runs.</small></span><b>&rsaquo;</b></button>
     <label class="switch-row pref" id="rowNotices" style="display:none"><span>Phone alerts on the PC<small>Your phone's notifications show on the PC, and you can reply there</small></span><input type="checkbox" id="prefNotices" onchange="toggleNotices()"></label>
     <label class="switch-row pref" id="rowWatch" style="display:none"><span>Watch<small>A notification your watch shows, to talk to the PC from it</small></span><input type="checkbox" id="prefWatch" onchange="toggleWatch()"></label>
     <label class="switch-row pref"><span>Full screen<small>Hide the phone's status and navigation bars</small></span><input type="checkbox" id="prefFull" onchange="toggleFullscreen()"></label>
@@ -2727,7 +3021,7 @@ PHONE_PAGE = r"""<!DOCTYPE html>
       <div><b id="musicTitle">Nothing's playing</b><div id="musicBy">Play something on the PC</div></div></div>
     <div class="music-keys">
       <button onclick="musicDo('prev')" aria-label="Back"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2v14H6zM20 5v14L9 12z"/></svg></button>
-      <button class="big" id="musicPlay" onclick="musicDo('playpause')" aria-label="Play or pause"><svg viewBox="0 0 24 24" fill="currentColor"><path id="musicPlayIcon" d="M7 5l12 7-12 7z"/></svg></button>
+      <button class="big" onclick="musicDo('playpause')" aria-label="Play or pause"><svg viewBox="0 0 24 24" fill="currentColor"><path id="musicPlayIcon" d="M7 5l12 7-12 7z"/></svg></button>
       <button onclick="musicDo('next')" aria-label="Next"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 5h2v14h-2zM4 5v14l11-7z"/></svg></button>
     </div>
     <div class="music-seek" id="musicSeekRow" style="display:none"><span id="musicAt">0:00</span><input type="range" id="musicSeek" min="0" max="100" step="1"><span id="musicLength">0:00</span></div>
@@ -2876,6 +3170,15 @@ PHONE_PAGE = r"""<!DOCTYPE html>
     </div>
   </div>
 </div>
+<div class="backdrop" id="voiceModal" onclick="if (event.target === this) closeVoiceCheck()">
+  <div class="sheet">
+    <div class="remote-head"><h3>Test my voice</h3><button class="btn btn-ghost" onclick="closeVoiceCheck()" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+    <button id="voiceHold" aria-label="Hold to talk"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg><span>Hold to talk</span></button>
+    <p id="voiceTip">Hold, say something, let go. I'll show what I heard, and nothing runs on your PC.</p>
+    <div id="voiceHeard"></div>
+    <div id="voiceHow"></div>
+  </div>
+</div>
 <div class="backdrop" id="confirmModal">
   <div class="dialog">
     <h3>Motorcycle Man needs your OK</h3>
@@ -2898,6 +3201,7 @@ const borderEl = document.getElementById('border');
 const looks = Array.from(faceEl.querySelectorAll('.look'));
 const MOOD_LOOK = /*MOOD_LOOK*/{}, LOOK_REACH = /*LOOK_REACH*/[5, 4];
 const PAGE_PAINT = /*PAINT*/"midnight", PAINTS = /*PAINTS*/[];
+const PAGE_BUILD = /*PAGE_BUILD*/"";  // which Motorcycle Man made this page (see pageChanged)
 const phoneToken = new URLSearchParams(window.location.search).get('token') || '';
 function requestUrl(path, params) {
   const query = new URLSearchParams(params || {});
@@ -4440,6 +4744,21 @@ function paintChanged(paint) {
   const open = Array.from(document.querySelectorAll('.backdrop')).some(b => b.style.display === 'block');
   if (paint && paint !== PAGE_PAINT && !busy && !awaitingReply && !holding && !tapListening && !open) location.reload();
 }
+// Motorcycle Man on the PC was updated: this page reloads itself as soon as nothing is going on (no press, no
+// answer awaited, no Send it, nothing open), so it never talks to the new PC the old way for long. Once for each
+// build, so a page that keeps coming back old can't reload over and over.
+function pageChanged(build) {
+  if (!build || !PAGE_BUILD || build === PAGE_BUILD) return;
+  const open = Array.from(document.querySelectorAll('.backdrop')).some(b => b.style.display === 'block');
+  if (talkPhase !== 'off' || tapListening || busy || awaitingReply || sendHeard || open) return;
+  try {
+    if (sessionStorage.getItem('mmPageBuild') === build) return;
+    sessionStorage.setItem('mmPageBuild', build);
+  } catch (err) {
+    return;
+  }
+  location.reload();
+}
 
 // Routines: each with Run and Delete (tap twice), and a form to make one or change one (tap its name).
 function openRoutines() {
@@ -4645,6 +4964,7 @@ setInterval(() => {
   if (!offline && now - lastContact > 9000) {
     offline = true;
     setChip('offline', "Can't reach your PC");
+    if (pausedTask) hidePaused(false);  // its Resume task couldn't reach the PC either; it comes back with the PC
     say("Can't reach Motorcycle Man on your PC.");
   }
   if (offline && now - lastContact > 20000 && window.MotorcycleManAndroid && window.MotorcycleManAndroid.findMovedPc) {
@@ -4678,6 +4998,7 @@ setInterval(() => {
       showNotice(state.notice);
       showPcName(state.pc);
       paintChanged(state.paint);
+      pageChanged(state.page);
       noticeHistory(state.history);
       tellAppAboutPcApp(state.app_version);
       if (tapListening === 'pc') {
@@ -4699,6 +5020,7 @@ setInterval(() => {
         setMode('idle');
       }
       updateStop();
+      showPaused(state.task || null);  // a task that stopped halfway, offered once things are quiet
     })
     .catch(() => {})
     .finally(() => {
@@ -4845,7 +5167,7 @@ function spokenWords(text) {
 }
 function speakReply(text) {
   const words = spokenWords(text), app = window.MotorcycleManAndroid;
-  if (!words) return;
+  if (!words || talkPhase !== 'off') return;  // while you talk, its voice would be heard as yours
   if (app && typeof app.speak === 'function') { app.speak(words); return; }
   if (!window.speechSynthesis) return;
   speechSynthesis.cancel();
@@ -4860,10 +5182,20 @@ function hush() {
 }
 showTalkBack();
 
+// A reply that comes while you talk (or while your words wait on Send it) waits, without a sound: its voice would be
+// heard as yours, and the bubble is showing your words. It shows after a press that sends nothing; a press that
+// sends gets its own reply instead.
+let heldReply = null;
 function showReply(reply) {
+  if (talkPhase !== 'off' || sendHeard) {
+    heldReply = reply || 'Done!';
+    return;
+  }
   if (talkBack && replyAloud) speakReply(reply || 'Done!');
   replyAloud = false;
   awaitingReply = false;
+  repliedAt = Date.now();
+  quietSince = 0;  // a paused task's bar comes back a moment after the reply, once it has been read (see showPaused)
   stopRequested = false;
   stopBtn.classList.remove('on');
   const text = reply || 'Done!';
@@ -4875,6 +5207,13 @@ function showReply(reply) {
   say(text);
   lastSay = '';
   showHint(true);
+}
+function showHeldReply() {
+  if (heldReply === null) return;
+  const reply = heldReply;
+  heldReply = null;
+  replyAloud = false;
+  showReply(reply);
 }
 
 function submitTyped() {
@@ -4910,20 +5249,175 @@ function stopTask() {
   fetch(requestUrl('/stop')).catch(() => {});
 }
 
-let recognition = null, spokenText = '';
-const recognitionLang = 'en-US';
+// A task that stopped halfway waits on the PC (Stop, a newer command, an update, a step that didn't work...).
+// Once nothing else has gone on for a moment (no command, no press, no words waiting on Send it), the chip says
+// Paused or Stuck and the bar under it offers to pick
+// it up where it stopped (like a typed command), or to forget it. Its words go in as text, never as HTML.
+const resumeBar = document.getElementById('resumeBar'), resumeGo = document.getElementById('resumeGo');
+const RESUME_AFTER_MS = 1500;
+let pausedTask = null, pausedShown = '', quietSince = 0, repliedAt = 0;
+const forgottenIds = new Set(), toldIds = new Set();
+function pausedLine(task) {
+  return (task.state === 'stuck' ? 'Stuck' : 'Paused') + (task.step > 0 ? ' at step ' + task.step : '') +
+    ': “' + task.request + '”';
+}
+function showPaused(task) {
+  // Each status check: the task the PC offers to pick up, or null.
+  if (task && forgottenIds.has(task.id)) task = null;
+  const quiet = !busy && !awaitingReply && !holding && !tapListening && talkPhase === 'off' && !sendHeard && !offline;
+  if (!quiet || !task) quietSince = 0;
+  else if (!quietSince) quietSince = Date.now();
+  if (!task || !quietSince || Date.now() - quietSince < RESUME_AFTER_MS) {
+    if (pausedTask) hidePaused(quiet);
+    return;
+  }
+  pausedTask = task;
+  const shown = [task.id, task.state, task.step, task.ask, task.words, task.request].join('\n');
+  if (shown !== pausedShown) {
+    pausedShown = shown;
+    document.getElementById('resumeTitle').textContent = pausedLine(task);
+    document.getElementById('resumeWhy').textContent = task.words || '';
+    resumeGo.textContent = task.ask || 'Resume task';
+    resumeBar.classList.toggle('stuck', task.state === 'stuck');
+    resumeBar.classList.add('on');
+  }
+  const chip = task.state === 'stuck' ? 'stuck' : 'paused';
+  if (!sleeping && chipEl.dataset.state !== chip) setChip(chip, chip === 'stuck' ? 'Stuck' : 'Paused');
+  if (!toldIds.has(task.id)) {
+    // Why it stopped, said once, and not over a reply that is still being read (the bar says it too).
+    toldIds.add(task.id);
+    if (!sleeping && Date.now() - repliedAt > 6000) {
+      const next = task.ask === 'Yes, send it' ? "Tap “Yes, send it” when you're sure."
+        : task.state === 'stuck' ? "Tap “Resume task” and I'll try again!"
+        : "Tap “Resume task” and I'll pick it up!";
+      react('waiting', 3000);
+      say(task.words ? task.words + ' ' + next : next);
+    }
+  }
+}
+function hidePaused(quiet) {
+  pausedTask = null;
+  pausedShown = '';
+  resumeBar.classList.remove('on');
+  // While something else goes on, that sets the chip itself.
+  if (quiet && (chipEl.dataset.state === 'paused' || chipEl.dataset.state === 'stuck')) setChip('ready', 'Ready');
+}
+function resumeTask() {
+  const task = pausedTask;
+  if (!task) return;
+  hidePaused(false);
+  wake();
+  say(task.ask === 'Yes, send it' ? 'Okay, sending it…' : 'Picking it up where I stopped…');
+  replyAloud = false;
+  awaitingReply = true;
+  setMode('thinking');
+  setChip('busy', 'Working');
+  showHint(false);
+  const mine = ++commandSeq;
+  stopRequested = false;
+  updateStop();
+  fetch(requestUrl('/resume', {id: task.id}))
+    .then(res => res.json())
+    .then(d => { if (mine === commandSeq) showReply(d.reply); })
+    .catch(() => { if (mine === commandSeq) showReply('Connection failed.'); });
+}
+function forgetPaused() {
+  const task = pausedTask;
+  if (!task) return;
+  forgottenIds.add(task.id);  // gone at once; an older paused task may show up after a moment
+  hidePaused(true);
+  wake();
+  quietSince = 0;
+  repliedAt = Date.now();
+  fetch(requestUrl('/forget_task', {id: task.id}), {cache: 'no-store'})
+    .then(res => res.ok ? res.json() : null)
+    .then(d => {
+      if (!d || d.ok === false) forgottenIds.delete(task.id);  // the PC kept it (it was starting just then)
+      if (d && d.reply) say(d.reply);
+    })
+    .catch(() => {
+      forgottenIds.delete(task.id);  // still on the PC: it comes back
+      say('Connection failed.');
+    });
+}
+
+// Talking: hold the face while talking and let go to send (pauses are fine: the listening goes on while the finger
+// is down), or tap it and just talk (the listening stops by itself when the talking does, or at another tap). One
+// press owns one finger and one talk key, from the finger going down to exactly one send, Send it offer or drop.
+let recognition = null, spokenText = '', browserOn = false, browserRuns = 0, browserKey = '', afterBrowserSpeech = null;
+let pressedAt = 0, tapListening = false, pcHeardListening = false;  // tapListening: false, 'phone' or 'pc'
+const pageKey = (() => {
+  // Eight hex characters, new at each page load, so two phones (or two tabs) never share a talk key.
+  const bytes = new Uint8Array(4);
+  if (window.crypto && crypto.getRandomValues) crypto.getRandomValues(bytes);
+  else bytes.forEach((b, i) => { bytes[i] = Math.floor(Math.random() * 256); });
+  return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+})();
+// talkEngine: 'app' (the app from 1.1), 'app1' (app 1.0), 'browser' (https) or 'pc' (the PC's microphone).
+// talkPhase: 'warming' and 'held' (finger down), 'quiet' (listening until the talking stops), 'ending', 'off'.
+let talkSeq = 0, talkKey = '', talkPointer = null, talkCaptureEl = null, talkEngine = '', talkPhase = 'off';
+let committed = '', live = '', talkAsk = false, talkStuck = false, talkReady = false, talkSent = false;
+let talkFastEmpties = 0, talkPieces = 0, talkTimers = [], talkStats = null, talkStarted = Promise.resolve();
+let pieceAt = 0, pieceHeard = false, pieceReady = false, pieceTrouble = false, restartTimer = 0, letGoAt = 0;
+let checkMode = false, sendHeard = null, sendHeardTimer = 0, pcChecks = false, pcSilent = false;
+
+// ---- talk-rules:start (plain rules with no page: a test runs this block under node)
+const TAP_MS = 350;
+const SLOW_TAP_MS = 1200;
+// When the finger lifts: a quick press is a tap (listen on until the talking stops), and so is a slower one that
+// heard nothing yet; a longer press is a hold (send what was heard). The tile and widget are always taps.
+function pressKind(heldMs, heard, forced) {
+  if (forced || heldMs < TAP_MS) return 'tap';
+  return heldMs < SLOW_TAP_MS && !heard ? 'tap' : 'hold';
+}
+// The words so far and the next piece, with one space between: no word is ever dropped, even one said twice.
+function joinWords(a, b) {
+  const first = String(a || '').trim().replace(/\s+/g, ' '), next = String(b || '').trim().replace(/\s+/g, ' ');
+  return first && next ? first + ' ' + next : first || next;
+}
+// A piece of listening that ended within a second, before its microphone was ready: the recognizer is in trouble.
+function fastEmpty(msSinceStart, wasReady) { return msSinceStart < 1000 && !wasReady; }
+// The wait before listening again after pieces in trouble: 0, 150, 600, then 900 ms.
+function restartDelay(troubles) { return [0, 150, 600, 900][Math.min(Math.max(troubles, 0), 3)]; }
+// The app's listen options from the PC's /words: {"hints": [...]}, the names its speech service should expect (each
+// one trimmed, at most 40 characters, at most 50 of them, no repeats), and "ownMic": true only when the PC's hidden
+// switch is on.
+function listenOptionsFrom(words, ownMic) {
+  const hints = [], seen = {};
+  for (const word of Array.isArray(words) ? words : []) {
+    if (typeof word !== 'string') continue;
+    const name = word.trim().replace(/\s+/g, ' ');
+    if (!name || name.length > 40 || seen[name.toLowerCase()] || hints.length >= 50) continue;
+    seen[name.toLowerCase()] = true;
+    hints.push(name);
+  }
+  const options = {hints};
+  if (ownMic === true) options.ownMic = true;
+  return JSON.stringify(options);
+}
+// ---- talk-rules:end
+const MAX_HOLD_MS = 120000, WARN_HOLD_MS = 110000, READY_SLOW_MS = 2500, READY_FAIL_MS = 6000;
+const FINAL_WORDS_MS = 4000, BROWSER_FINAL_MS = 1500, TAP_LIMIT_MS = 35000, SEND_IT_MS = 15000;
+const RESTART_LIMIT = 6, MAX_WORDS = 2000;
+const LEFT_WORDS = 'I stopped listening when you left. Hold me again.';
+
+// The phone's own English (en-GB, en-IN...) hears its accent best; any other language listens in US English.
+function listenLang() {
+  const lang = String(navigator.language || '');
+  return /^en-[A-Za-z]{2}$/.test(lang) ? lang : 'en-US';
+}
+const recognitionLang = listenLang();
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 if (SR) {
   recognition = new SR();
-  recognition.continuous = false;
+  recognition.continuous = false;  // Chrome on Android repeats words when continuous: a hold listens again instead
   recognition.interimResults = true;
   recognition.lang = recognitionLang;
-  recognition.onresult = e => {
-    spokenText = Array.from(e.results).map(r => r[0].transcript).join('');
-    say('“' + spokenText + '”');
-  };
-  // After a tap, the browser stops listening by itself at the end of what was said.
-  recognition.onend = () => { if (tapListening === 'phone') heardEverything(); };
+  recognition.onaudiostart = () => browserReady();
+  recognition.onresult = e => browserHeard(e);
+  recognition.onerror = e => browserTrouble(e.error);
+  // The browser stops at each pause: while the finger is down it listens again, after a tap the words go.
+  recognition.onend = () => browserSpeechEnded();
 }
 // Through the internet link (https) the phone is away from the PC: it listens itself (the browser
 // may, on https), and the PC's microphone, which would only hear the empty room, stays off.
@@ -4932,18 +5426,76 @@ const remote = location.protocol === 'https:';
 // Inside the Motorcycle Man Android app, the phone's own speech recognition listens (the app's web view
 // has no speech API). Elsewhere, or if the phone has none, Motorcycle Man records the PC's microphone.
 const androidSpeech = window.MotorcycleManAndroid && window.MotorcycleManAndroid.isAvailable() ? window.MotorcycleManAndroid : null;
-let androidDone = true, androidNote = '', afterAndroidSpeech = null;
-window.onAndroidSpeech = (text, final) => {
-  if (text) {
-    spokenText = text;
-    say('“' + text + '”');
+// The app from 1.1 listens on through pauses itself, says when its microphone is ready, and follows the finger.
+const holdApp = androidSpeech && typeof androidSpeech.listen === 'function' ? androidSpeech : null;
+// The names its speech service should expect (Motorcycle Man, routines, apps), asked for once and only by the app
+// from 1.1; a press before they come listens without them.
+let listenOptions = '{}';
+if (holdApp) {
+  fetch(requestUrl('/words'), {cache: 'no-store'})
+    .then(res => res.ok ? res.json() : null)
+    .then(d => { if (d) listenOptions = listenOptionsFrom(d.words, d.ownMic); })
+    .catch(() => {});
+}
+let androidDone = true, androidNote = '', afterAndroidSpeech = null, talkPointerLost = false, app1QuietUntil = 0;
+// The app names the press each callback is for (1.1); 1.0's unnamed callbacks count only during a 1.0 press, and not
+// in the first moment of a press that began while the last one's words were still coming: those are the last
+// press's (1.0 sends each piece's words whole, so nothing of the new press is lost).
+const APP1_SETTLE_MS = 300;
+function androidCallback(talk) {
+  if (talk === undefined || talk === null) {
+    return talkEngine === 'app1' && talkPhase !== 'off' && Date.now() >= app1QuietUntil;
+  }
+  return talk === talkKey && talkPhase !== 'off';
+}
+window.onAndroidSpeech = (text, final, talk) => {
+  if (!androidCallback(talk)) return;
+  const words = String(text || '');
+  if (words) {
+    // App 1.1 sends all the press's words so far; app 1.0 those of the piece it is listening to.
+    live = words;
+    pieceHeard = true;
+    talkFastEmpties = 0;
+    showWordsSoFar();
   }
   if (final) androidSpeechEnded();
 };
-window.onAndroidSpeechError = message => {
-  androidNote = message;
-  if (message) say(message);
+window.onAndroidSpeechError = (message, talk) => {
+  if (!androidCallback(talk)) return;
+  const words = String(message || '');
+  if (talkEngine === 'app') {
+    // App 1.1 always ends a press with its final words, so this only says what went wrong.
+    if (words) breakTalk(words);
+    return;
+  }
+  // App 1.0: '' means nothing (more) was heard; a busy or lost speech service (errors 4, 8, 11) is tried again.
+  pieceTrouble = /\(error (4|8|11)\)/.test(words);
+  if (words && !pieceTrouble) breakTalk(words);
   androidSpeechEnded();
+};
+window.onAndroidSpeechState = (state, talk, how) => {
+  if (talkEngine !== 'app' || !androidCallback(talk)) return;
+  if (state === 'ready') {
+    pieceReady = true;
+    talkFastEmpties = 0;
+    talkIsReady(how);
+  } else if (state === 'gap') {
+    setGap(true);
+    talkPieces++;
+    if (talkStats) talkStats.r++;
+    // Piece by piece (Android 12 and older), a word said in the short restart gap can be lost: the PC's log says so.
+    if (talkStats && how === 'loop') talkStats.how = 'gap';
+  } else if (state === 'stopped') leftPage();  // the app went to the background
+};
+window.onAndroidSpeechLevel = (level, talk) => {
+  if (talk !== talkKey || talkPhase === 'off') return;
+  talkEl().style.setProperty('--voice', String(Math.max(0, Math.min(1, Number(level) || 0))));
+};
+window.onAndroidFinger = (kind, talk) => {
+  // The app follows the finger itself, so a web view that lets go of the touch can't cut a hold short.
+  if (talk !== talkKey || talkPointer === null) return;
+  if (kind === 'up') releasePress(false, false);
+  else if (kind === 'cancel') takenTouch();
 };
 window.onAndroidNotice = message => { say(message); };
 // The app's home-screen widget, quick-settings tile and share sheet: "listen" (as if the helmet was tapped),
@@ -4953,8 +5505,8 @@ window.appAction = what => {
   if (what === 'screen') openScreen();
   else if (what === 'remote') openRemote();
   else if (what === 'listen' && !holding && !tapListening) {
-    document.getElementById('stage').dispatchEvent(new PointerEvent('pointerdown', {bubbles: true}));
-    window.dispatchEvent(new PointerEvent('pointerup'));
+    closeVoiceCheck();
+    startTalk(null, true, false);
   }
 };
 // Several PCs: inside the Android app, Settings > Switch PC lists the PCs this phone knows, to switch between them.
@@ -5007,121 +5559,683 @@ window.appAsk = text => {
 };
 function androidSpeechEnded() {
   androidDone = true;
-  if (afterAndroidSpeech) afterAndroidSpeech();
-}
-
-function sendSpoken(untilQuiet) {
-  afterAndroidSpeech = null;
-  if (androidSpeech && !spokenText.trim()) {
-    // Nothing was heard on the phone; don't fall back to the PC's microphone.
-    say(androidNote || "I didn't hear anything. Tap me and talk.");
-    awaitingReply = false;
-    setMode('idle');
-    setChip('ready', 'Ready');
+  // App 1.1 ended a press by itself (trouble) after the web view lost the touch: it won't say when the finger
+  // lifts, so the press listens no more, and what it heard waits on Send it.
+  if (talkEngine === 'app' && talkPointerLost && (talkPhase === 'warming' || talkPhase === 'held')) {
+    takenTouch();
     return;
   }
-  // untilQuiet: the PC's microphone keeps listening until the talking stops (after a tap).
-  const mine = ++commandSeq;
-  replyAloud = true;
-  stopRequested = false;
-  fetch(requestUrl('/hold_stop', untilQuiet ? {text: '', auto: '1'} : {text: spokenText.trim()}))
-    .then(res => res.json())
-    .then(d => { if (mine === commandSeq) { tapListening = false; showReply(d.reply); } })
-    .catch(() => { if (mine === commandSeq) { tapListening = false; showReply('Connection failed.'); } });
+  // App 1.0 stops at each pause: while held (or before a tap heard anything) it listens again.
+  if (talkEngine === 'app1' && talkPhase !== 'ending' && talkPhase !== 'off' && (pieceEnded() || holding)) return;
+  if (afterAndroidSpeech) afterAndroidSpeech();
+}
+function browserSpeechEnded() {
+  browserRuns = Math.max(0, browserRuns - 1);
+  browserOn = browserRuns > 0;
+  // An older piece's end (one stopped for a newer press), or no press is listening in the browser.
+  if (browserOn || browserKey !== talkKey || talkEngine !== 'browser' || talkPhase === 'off') return;
+  if (talkPhase !== 'ending' && (pieceEnded() || holding)) return;
+  if (afterBrowserSpeech) afterBrowserSpeech();
 }
 
-// Talking: tap the face and just talk (listening stops by itself when the talking does, or at
-// another tap), or hold it while talking and let go to send.
-const TAP_MS = 350;
-let pressedAt = 0, tapListening = false, pcHeardListening = false;  // tapListening: false, 'phone' or 'pc'
+const voiceHoldEl = document.getElementById('voiceHold'), voiceHeardEl = document.getElementById('voiceHeard');
+const voiceHowEl = document.getElementById('voiceHow'), sendHeardBtn = document.getElementById('sendHeardBtn');
+function talkEl() { return checkMode ? voiceHoldEl : faceEl; }
+function talkSay(text) {
+  if (checkMode) voiceHowEl.textContent = text;
+  else say(text);
+}
+// The press's own timers: they do nothing once the press is over, or for a newer press.
+function talkLater(fn, ms) {
+  const key = talkKey;
+  talkTimers.push(setTimeout(() => { if (key === talkKey && talkPhase !== 'off') fn(); }, ms));
+}
+function cancelRestart() {
+  if (!restartTimer) return false;
+  clearTimeout(restartTimer);
+  restartTimer = 0;
+  return true;
+}
+function setGap(on) { talkEl().classList.toggle('gap', on); }  // one soft breath while the ears start again
+function showWordsSoFar() {
+  spokenText = joinWords(committed, live);
+  if (!spokenText) return;
+  setGap(false);
+  const shown = '“' + (spokenText.length > 160 ? '…' + spokenText.slice(-160) : spokenText) + '”';
+  if (checkMode) voiceHeardEl.textContent = shown;
+  else say(shown);
+}
+function listeningWords() {
+  if (talkPhase === 'quiet') return "I'm listening… just talk.";
+  return Date.now() - pressedAt < TAP_MS ? "I'm listening…" : "I'm listening… let go when you're done.";
+}
+// The microphone is on: only now does the face say it's listening (with a tiny buzz).
+function talkIsReady(how) {
+  setGap(false);
+  if (talkReady || talkPhase === 'off' || talkPhase === 'ending') return;
+  talkReady = true;
+  if (talkStats) {
+    talkStats.ready = Date.now() - pressedAt;
+    if (how && talkStats.how !== 'gap') talkStats.how = String(how).slice(0, 8);
+  }
+  talkEl().classList.remove('warming');
+  if (talkPhase === 'warming') talkPhase = 'held';
+  if (!checkMode) setChip('listening', 'Listening');
+  if (!spokenText) talkSay(listeningWords());
+  if (talkEngine !== 'app' && navigator.vibrate) navigator.vibrate(12);  // the app buzzes by itself
+}
+function micDidntStart() {
+  if (talkReady || talkStuck) return;  // stuck: the ears already said what went wrong
+  if (pcSilent) {
+    talkSay(PC_SILENT);  // the PC's microphone started, but no sound comes: the question stays
+    return;
+  }
+  if (talkPhase === 'quiet' && talkEngine !== 'pc') {
+    dropTalk("The microphone didn't start. Tap me and try again.");  // after a tap nothing more would come
+    return;
+  }
+  talkSay("The microphone didn't start. Let go and try again.");
+}
+// Each request of a press carries its key (so the PC pairs its start and stop) and its numbers, never its words.
+function withTalk(params) {
+  const out = Object.assign({}, params, {s: talkKey});
+  if (talkStats) out.talk = JSON.stringify(talkStats).slice(0, 300);
+  return out;
+}
+
+// A finger on the face (or on Test my voice's button), or the widget and tile (forcedTap): a new press.
+function startTalk(event, forcedTap, check) {
+  if (event) {
+    if (!event.isPrimary || event.button > 0 || talkPointer !== null) return;  // a second finger, the palm, other mouse buttons
+    event.preventDefault();
+  }
+  if (tapListening) {
+    doneTalking();  // another tap: done talking
+    return;
+  }
+  const engine = holdApp ? 'app' : androidSpeech ? 'app1' : !remote ? 'pc' : recognition ? 'browser' : '';
+  if (!engine) {
+    const away = "I can't hear you through this browser away from home. Tap the keyboard to type, or use the Motorcycle Man app.";
+    if (check) voiceHowEl.textContent = away;
+    else say(away);
+    return;
+  }
+  const app1Ending = talkEngine === 'app1' && !androidDone;  // app 1.0 may still send the last press's words
+  if (talkPhase !== 'off') finishTalk(true);  // the last press's words go now
+  clearSendHeard(false);  // words waiting on Send it go away with a new press
+  hush();  // its own voice would be heard as the user's
+  if (pausedTask) hidePaused(false);  // the resume bar steps aside; it comes back once things are quiet
+  checkMode = !!check;
+  talkKey = pageKey + '-' + (++talkSeq);
+  talkEngine = engine;
+  talkPointer = event ? event.pointerId : -1;
+  talkCaptureEl = null;
+  if (event) {
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+      talkCaptureEl = event.currentTarget;
+    } catch (err) {}
+  }
+  talkPhase = 'warming';
+  holding = true;
+  pressedAt = Date.now();
+  letGoAt = 0;
+  committed = live = spokenText = androidNote = '';
+  talkAsk = talkStuck = talkReady = talkSent = pcSilent = talkPointerLost = false;
+  talkFastEmpties = talkPieces = 0;
+  talkStats = {e: engine, r: 0, ready: -1};
+  talkStarted = Promise.resolve();
+  const el = talkEl();
+  el.classList.remove('gap');
+  el.classList.add('held', 'warming');
+  if (checkMode) voiceHeardEl.textContent = '';
+  else {
+    wake();
+    setMode('listening');
+    setChip('listening', 'Getting ready');
+    showHint(false);
+  }
+  talkSay('One sec…');
+  talkLater(() => { if (!talkReady && !talkStuck) talkSay(pcSilent ? PC_SILENT : 'Still waking up the microphone…'); }, READY_SLOW_MS);
+  talkLater(micDidntStart, READY_FAIL_MS);
+  talkLater(() => { if (talkPhase === 'held' && !spokenText) talkSay("I'm listening… let go when you're done."); }, TAP_MS);
+  talkLater(() => { if (holding) talkSay('Still listening: 10 seconds left.'); }, WARN_HOLD_MS);
+  talkLater(() => {
+    if (!holding) return;
+    talkSay("That's a long one! Sending what I heard.");
+    releasePress(false, true);
+  }, MAX_HOLD_MS);
+  const key = talkKey;
+  if (engine === 'pc') {
+    talkStarted = fetch(requestUrl('/hold_start', withTalk({})))
+      .then(res => res.text())
+      .then(answer => pcStarted(key, answer), () => pcStarted(key, ''));
+  } else {
+    // The phone listens; the PC only keeps its own voice down.
+    fetch(requestUrl('/hold_start', withTalk({mic: 'phone'}))).catch(() => {});
+    if (engine === 'app') {
+      androidDone = false;
+      holdApp.listen(recognitionLang, key, listenOptions);
+    } else {
+      if (engine === 'app1') app1QuietUntil = app1Ending ? Date.now() + APP1_SETTLE_MS : 0;
+      startPiece();
+      if (engine === 'app1') talkIsReady('');  // app 1.0 can't tell when its microphone is on
+    }
+  }
+  if (forcedTap) releasePress(true, false);
+}
+
+// The finger lifted (on the face or anywhere else): only the press's own finger counts.
+function letGo(event) {
+  if (talkPointer === null || event.pointerId !== talkPointer) return;
+  releasePress(false, false);
+}
+// The finger lifted, or the tile asked, or time ran out: a tap listens on until the quiet, a hold finishes.
+function releasePress(forcedTap, timeUp) {
+  if (talkPhase !== 'warming' && talkPhase !== 'held') return;
+  const heldMs = Date.now() - pressedAt;
+  talkPointer = null;
+  talkCaptureEl = null;
+  holding = false;
+  if (talkStats) talkStats.ms = heldMs;
+  if (!timeUp && pressKind(heldMs, !!joinWords(committed, live), forcedTap) === 'tap') {
+    untilQuiet(false, '');
+    return;
+  }
+  talkPhase = 'ending';
+  letGoAt = Date.now();
+  thinkingNow();
+  if (talkEngine === 'app') {
+    if (androidDone) { finishTalk(false); return; }
+    afterAndroidSpeech = () => finishTalk(false);
+    holdApp.doneListening(talkKey);
+    talkLater(() => finishTalk(true), FINAL_WORDS_MS);
+  } else if (talkEngine === 'app1') {
+    // The final words arrive a moment after the phone stops listening.
+    if (cancelRestart() || androidDone) { finishTalk(false); return; }
+    afterAndroidSpeech = () => finishTalk(false);
+    androidSpeech.stopListening();
+    talkLater(() => finishTalk(true), FINAL_WORDS_MS);
+  } else if (talkEngine === 'browser') {
+    if (cancelRestart() || !browserOn) { finishTalk(false); return; }
+    afterBrowserSpeech = () => finishTalk(false);
+    try { recognition.stop(); } catch (err) {}
+    talkLater(() => finishTalk(true), BROWSER_FINAL_MS);
+  } else {
+    pcFinish(false, false);
+  }
+}
+// Listening on until the talking stops: after a tap, or after Android took the finger (ask: offer, don't send).
+function untilQuiet(ask, words) {
+  talkPhase = 'quiet';
+  talkAsk = talkAsk || ask;
+  holding = false;
+  talkEl().classList.remove('held');
+  talkSay(words || (talkReady ? "I'm listening… just talk." : 'One sec…'));
+  talkLater(doneTalking, TAP_LIMIT_MS);
+  if (talkEngine === 'app') {
+    tapListening = 'phone';
+    afterAndroidSpeech = heardEverything;
+    if (androidDone) heardEverything();
+    else holdApp.listenUntilQuiet(talkKey);
+  } else if (talkEngine === 'app1') {
+    // The phone stops by itself at the end of what was said.
+    tapListening = 'phone';
+    afterAndroidSpeech = heardEverything;
+    if (androidDone && !restartTimer) heardEverything();
+  } else if (talkEngine === 'browser') {
+    tapListening = 'phone';  // the browser listens (started on the press) and stops by itself
+    afterBrowserSpeech = heardEverything;
+    if (!browserOn && !restartTimer) heardEverything();
+  } else {
+    // The PC's microphone listens until the talking stops.
+    tapListening = 'pc';
+    pcHeardListening = false;
+    pcFinish(true, ask);
+  }
+}
+// Android (or the browser) took the finger in the middle of a hold: listen on until the quiet, then offer the words.
+function takenTouch() {
+  if (talkPhase !== 'warming' && talkPhase !== 'held') return;
+  talkPointer = null;
+  talkCaptureEl = null;
+  if (talkStats) talkStats.ms = Date.now() - pressedAt;
+  untilQuiet(true, talkEngine === 'app' || talkEngine === 'app1'
+    ? "Android took my touch, so I'll stop when you stop talking."
+    : "I lost your touch, so I'll stop when you stop talking.");
+}
+function lostPointer(event) {
+  if (talkPointer === null || event.pointerId !== talkPointer) return;
+  // A part of the face handing its touch over to the stage isn't a lost touch.
+  if (event.type === 'lostpointercapture' && event.target !== talkCaptureEl) return;
+  if (document.visibilityState === 'hidden') {
+    dropTalk(LEFT_WORDS);
+    return;
+  }
+  if (talkEngine === 'app' && !androidDone && holdApp.fingerDown()) {
+    talkPointerLost = true;  // only the web view let go: the app says when the finger lifts
+    return;
+  }
+  takenTouch();
+}
+
+// A piece of listening ended (app 1.0 and the browser stop at each pause). Its words join the ones so far, and
+// while the finger is down (or a tap heard nothing yet) the listening starts again.
+function pieceEnded() {
+  const fast = pieceTrouble || (!pieceHeard && fastEmpty(Date.now() - pieceAt, pieceReady));
+  pieceTrouble = false;
+  if (live) talkPieces++;
+  committed = joinWords(committed, live);
+  live = '';
+  talkFastEmpties = fast ? talkFastEmpties + 1 : 0;
+  const again = talkPhase === 'warming' || talkPhase === 'held' || (talkPhase === 'quiet' && fast && !committed);
+  if (!again || talkStuck) return false;
+  if (talkFastEmpties >= RESTART_LIMIT) {
+    // The words so far are kept (they go when the finger lifts).
+    talkStuck = true;
+    androidNote = 'My ears on this phone stopped. Try again.';
+    talkSay(holding ? 'My ears on this phone stopped. Let go and try again.' : androidNote);
+    return false;
+  }
+  listenAgain();
+  return true;
+}
+function listenAgain() {
+  setGap(true);
+  if (talkStats) talkStats.r++;
+  const key = talkKey;
+  cancelRestart();
+  restartTimer = setTimeout(() => {
+    restartTimer = 0;
+    if (key === talkKey && (talkPhase === 'warming' || talkPhase === 'held' || talkPhase === 'quiet')) startPiece();
+  }, restartDelay(talkFastEmpties));
+}
+function startPiece() {
+  pieceAt = Date.now();
+  pieceHeard = pieceReady = pieceTrouble = false;
+  if (talkEngine === 'app1') {
+    androidDone = false;
+    androidSpeech.startListening(recognitionLang);
+  } else if (talkEngine === 'browser') {
+    startBrowserSpeech(0);
+  }
+}
+function startBrowserSpeech(tries) {
+  const key = talkKey;
+  try {
+    recognition.start();
+    browserRuns++;
+    browserOn = true;
+    browserKey = key;
+  } catch (err) {
+    // The last piece is still stopping: try again in a moment.
+    if (tries < 3) {
+      restartTimer = setTimeout(() => {
+        restartTimer = 0;
+        if (key === talkKey && talkPhase !== 'off' && talkPhase !== 'ending') startBrowserSpeech(tries + 1);
+      }, 150);
+      return;
+    }
+    breakTalk(holding ? "The microphone didn't start. Let go and try again." : "The microphone didn't start. Tap me and try again.");
+    androidNote = "The microphone didn't start. Try again.";  // what shows once the press is over
+    if (!holding) finishTalk(false);
+  }
+}
+function browserReady() {
+  if (browserKey !== talkKey || talkPhase === 'off') return;
+  pieceReady = true;
+  talkFastEmpties = 0;
+  talkIsReady('');
+}
+function browserHeard(e) {
+  if (browserKey !== talkKey || talkPhase === 'off') return;
+  let words = '';
+  for (let i = 0; i < e.results.length; i++) words = joinWords(words, e.results[i][0].transcript);
+  if (!words) return;
+  live = words;
+  pieceHeard = true;
+  talkFastEmpties = 0;
+  showWordsSoFar();
+}
+const BROWSER_TROUBLE = {'not-allowed': 'Allow the microphone for this page, then hold me again.',
+                         'service-not-allowed': 'Allow the microphone for this page, then hold me again.',
+                         'audio-capture': 'No microphone found on this phone.',
+                         network: 'Listening here needs the internet.'};
+function browserTrouble(code) {
+  if (browserKey !== talkKey || talkPhase === 'off') return;
+  // 'no-speech' only ends the piece (a hold listens again); 'aborted' is our own stop.
+  if (BROWSER_TROUBLE[code]) breakTalk(BROWSER_TROUBLE[code]);
+}
+// The ears had real trouble (no permission, no microphone, no internet): no more listening again for this press,
+// and the words so far wait on Send it.
+function breakTalk(message) {
+  talkStuck = true;
+  talkAsk = true;
+  androidNote = message;
+  cancelRestart();
+  talkSay(message);
+}
+
+// Stops this press's listening without using its words.
+function cancelEngine() {
+  cancelRestart();
+  if (talkEngine === 'app') holdApp.cancelListening(talkKey);
+  else if (talkEngine === 'app1') {
+    if (!androidDone) androidSpeech.stopListening();
+  } else if (talkEngine === 'browser') {
+    if (browserOn) { try { recognition.abort(); } catch (err) {} }
+  } else if (!talkSent) {
+    // The PC throws its recording away; the stop goes after the start, so the two never cross.
+    talkSent = true;
+    const params = withTalk({text: '', drop: '1'});
+    talkStarted.then(() => fetch(requestUrl('/hold_stop', params))).catch(() => {});
+  }
+}
+// Puts the press away. Its key stays, so late answers for it can be told apart.
+function endTalk() {
+  talkTimers.forEach(clearTimeout);
+  talkTimers = [];
+  cancelRestart();
+  const el = talkEl();
+  el.classList.remove('held', 'warming', 'gap');
+  el.style.removeProperty('--voice');
+  talkPhase = 'off';
+  talkPointer = null;
+  talkCaptureEl = null;
+  holding = false;
+  tapListening = false;
+  talkAsk = false;
+  afterAndroidSpeech = null;
+  afterBrowserSpeech = null;
+}
+// The press is over. With the phone's ears, what was heard goes once (or waits on Send it, or shows in Test my voice).
+function finishTalk(engineStillOn) {
+  if (talkPhase === 'off') return;
+  if (talkEngine === 'pc') {
+    // The PC's press has its stop (or gets its drop now); its answer finds no press and is left out.
+    cancelEngine();
+    endTalk();
+    return;
+  }
+  if (engineStillOn) cancelEngine();
+  talkDone(joinWords(committed, live).slice(0, MAX_WORDS), heardBy(talkEngine, ''), talkPieces + (live ? 1 : 0));
+}
+function talkDone(words, how, pieces) {
+  const key = talkKey, ask = talkAsk, params = withTalk({text: words});
+  endTalk();
+  if (checkMode) {
+    voiceResult(words, how, pieces);
+    return;
+  }
+  if (!words) {
+    nothingHeard();
+    return;
+  }
+  if (ask) {
+    offerSend(words, params);
+    return;
+  }
+  spokenText = words;
+  thinkingNow();
+  postHold(params, key, Promise.resolve());
+}
+function heardEverything() {
+  // The listening after a tap has ended: what was heard goes to Motorcycle Man.
+  finishTalk(false);
+}
 function thinkingNow() {
-  faceEl.classList.remove('held');
+  talkEl().classList.remove('held', 'warming', 'gap');
+  if (talkAsk) return;  // the words will wait on Send it
+  if (checkMode) {
+    talkSay('Writing down what I heard…');
+    return;
+  }
   setMode('thinking');
   setChip('busy', 'Thinking');
   if (!spokenText) say('Got it, one moment…');
   awaitingReply = true;
 }
-function heardEverything() {
-  // The listening after a tap has ended: what was heard goes to Motorcycle Man.
-  tapListening = false;
-  thinkingNow();
-  sendSpoken(false);
+function talkIdle() {
+  awaitingReply = false;
+  setMode('idle');
+  setChip('ready', 'Ready');
+  showHint(true);
+  updateStop();
 }
-document.getElementById('stage').addEventListener('pointerdown', () => {
-  if (tapListening) {
-    // Another tap: done talking.
-    if (tapListening === 'phone' && androidSpeech) androidSpeech.stopListening();
-    else if (tapListening === 'phone') { try { recognition.stop(); } catch (err) {} }
-    else fetch(requestUrl('/listen_stop')).catch(() => {});
-    return;
-  }
-  if (remote && !androidSpeech && !recognition) {
-    say("I can't hear you through this browser away from home. Tap the keyboard to type, or use the Motorcycle Man app.");
-    return;
-  }
-  if (afterAndroidSpeech) afterAndroidSpeech();
-  hush();  // its own voice would be heard as the user's
-  pressedAt = Date.now();
-  holding = true;
-  spokenText = '';
-  faceEl.classList.add('held');
-  wake();
-  setMode('listening');
-  setChip('listening', 'Listening');
-  say("I'm listening…");
-  showHint(false);
-  if (androidSpeech) {
-    androidDone = false;
-    androidNote = '';
-    androidSpeech.startListening(recognitionLang);
-    return;
-  }
-  if (!remote) fetch(requestUrl('/hold_start')).catch(() => {});
-  if (recognition) {
-    try { recognition.start(); } catch (err) {}
-  }
-});
+function nothingHeard() {
+  // Nothing was heard on the phone; don't fall back to the PC's microphone.
+  talkIdle();
+  say(androidNote || "I didn't hear anything. Tap me and talk.");
+  afterNoSend();
+}
+function afterNoSend() {
+  // A reply that came during the press shows now (without a sound), after a moment to read what happened.
+  if (heldReply !== null) setTimeout(() => { if (talkPhase === 'off' && !sendHeard) showHeldReply(); }, 1800);
+}
 
-window.addEventListener('pointerup', () => {
-  if (!holding) return;
-  holding = false;
-  if (Date.now() - pressedAt < TAP_MS) {
-    // A tap: keep listening until the talking stops.
-    say("I'm listening… just talk.");
-    if (androidSpeech) {
-      // The phone stops by itself at the end of what was said.
-      tapListening = 'phone';
-      afterAndroidSpeech = heardEverything;
-      if (androidDone) heardEverything();
-    } else if (remote) {
-      tapListening = 'phone';  // the browser listens (started on the press) and stops by itself
-    } else {
-      // The PC's microphone listens until the talking stops. (A browser's own listening needs https,
-      // which Motorcycle Man's page on the Wi-Fi doesn't have, so it would stop at once.)
-      if (recognition) { try { recognition.abort(); } catch (err) {} }
+// One send per press: what was heard (or, with the PC's microphone, its recording) goes to Motorcycle Man.
+function postHold(params, key, started) {
+  const mine = ++commandSeq;
+  replyAloud = true;
+  stopRequested = false;
+  heldReply = null;  // this press's own reply comes instead of one that came while it was on
+  started.then(() => fetch(requestUrl('/hold_stop', params)))
+    .then(res => res.json())
+    .then(d => { if (mine === commandSeq) replyCame(key, d || {}); })
+    .catch(() => { if (mine === commandSeq) replyCame(key, {reply: 'Connection failed.'}); });
+}
+const PC_TAKEN = "The PC's microphone was taken over. Try again.";
+function replyCame(key, d) {
+  if (tapListening === 'pc' && key === talkKey) tapListening = false;
+  const reply = d.reply;
+  if (!reply && talkPhase !== 'off') { awaitingReply = false; return; }  // replaced by the press that is on now
+  if (d.replaced) {
+    // Another press (another phone) took the PC's microphone: nothing ran, so no "Done!".
+    stopRequested = false;
+    talkIdle();
+    say(PC_TAKEN);
+    return;
+  }
+  showReply(reply);
+}
+// The PC's microphone: its stop always goes after its start, and once. Test my voice, or a press Android cut short,
+// asks the PC to write the words down without running them (a PC that answers /hold_start in JSON can).
+function pcFinish(quiet, ask) {
+  const key = talkKey, started = talkStarted;
+  const send = withTalk(quiet ? {text: '', auto: '1'} : {text: ''});
+  talkSent = true;
+  if (!checkMode && !ask) {
+    endTalk();
+    if (quiet) tapListening = 'pc';  // the PC listens on until the quiet: its status and answer end it
+    postHold(send, key, started);
+    return;
+  }
+  const check = withTalk(quiet ? {text: '', auto: '1', check: '1'} : {text: '', check: '1'});
+  const drop = withTalk({text: '', drop: '1'});
+  started.then(() => {
+    if (key !== talkKey || talkPhase === 'off') {
+      fetch(requestUrl('/hold_stop', drop)).catch(() => {});  // the press was let go meanwhile
+    } else if (!pcChecks && checkMode) {
+      fetch(requestUrl('/hold_stop', drop)).catch(() => {});
+      dropTalk('Update Motorcycle Man on your PC to test its microphone.');
+    } else if (!pcChecks) {
+      // This PC can't write words down without running them: what it hears goes at the quiet, as before.
+      endTalk();
       tapListening = 'pc';
-      pcHeardListening = false;
-      sendSpoken(true);
+      postHold(send, key, Promise.resolve());
+    } else {
+      fetch(requestUrl('/hold_stop', check))
+        .then(res => res.json())
+        .then(d => pcHeard(key, d), () => pcHeard(key, null));
     }
+  });
+}
+const PC_SILENT = "The PC's microphone sounds silent. Is it muted?";
+function pcStarted(key, answer) {
+  let reply = null;
+  try { reply = JSON.parse(answer); } catch (err) {}
+  if (reply && typeof reply.ready === 'boolean') pcChecks = true;  // this PC says when its microphone hears
+  if (key !== talkKey) return;
+  const trouble = reply && (reply.ok === false || reply.error) ? String(reply.error || "The PC's microphone didn't start. Try again.") : '';
+  // On, but no sound has come yet: "Getting ready" stays, and the face asks about the mute.
+  const silent = !trouble && !!reply && reply.ok === true && reply.ready === false;
+  const ready = !trouble && !!reply && reply.ready === true;
+  if (talkPhase === 'off') {
+    // A tap, already sent: the PC listens until the quiet (and its answer says if the microphone failed).
+    if (tapListening === 'pc' && ready) {
+      setChip('listening', 'Listening');
+      say("I'm listening… just talk.");
+    } else if (tapListening === 'pc' && silent) say(PC_SILENT);
     return;
   }
-  thinkingNow();
-  if (androidSpeech) {
-    if (androidDone) {
-      sendSpoken();
-      return;
-    }
-    // The final words arrive a moment after the phone stops listening.
-    afterAndroidSpeech = sendSpoken;
+  if (trouble) dropTalk(trouble);
+  else if (ready) talkIsReady('');
+  else if (silent) {
+    pcSilent = true;
+    talkSay(PC_SILENT);
+  }
+}
+function pcHeard(key, d) {
+  if (key !== talkKey || talkPhase === 'off') return;
+  if (d && d.replaced) {
+    dropTalk(PC_TAKEN);
+    return;
+  }
+  const words = d && typeof d.heard === 'string' ? d.heard.trim().slice(0, MAX_WORDS) : '';
+  if (!words) androidNote = d ? String(d.reply || '') : 'Connection failed.';
+  talkDone(words, heardBy('pc', d && d.engine), 1);
+}
+
+// Nothing is sent: the app went to the background, the screen went off, a call came in, or the microphone failed.
+function dropTalk(words) {
+  if (talkPhase === 'off' && tapListening !== 'pc') {
+    clearSendHeard(true);
+    return;
+  }
+  clearSendHeard(false);
+  if (talkPhase === 'off') {
+    // A tap's PC listening, its stop already sent: the PC throws the recording away, and its answer isn't shown.
+    const params = withTalk({text: '', drop: '1'});
+    commandSeq++;
+    tapListening = false;
+    talkStarted.then(() => fetch(requestUrl('/hold_stop', params))).catch(() => {});
+  } else {
+    cancelEngine();
+    endTalk();
+  }
+  if (checkMode) {
+    voiceHeardEl.textContent = '';
+    voiceHowEl.textContent = words;
+    return;
+  }
+  talkIdle();
+  if (words) say(words);
+  afterNoSend();
+}
+// Leaving the app (Home, the screen going off, a call): a hold already let go sends the words heard so far, as the
+// PC's microphone does; a press still going is dropped, and nothing is sent.
+function leftPage() {
+  if (talkPhase === 'ending' && talkEngine !== 'pc' && joinWords(committed, live)) finishTalk(true);
+  else dropTalk(LEFT_WORDS);
+}
+// Another tap while listening after a tap: done talking (the last words still come, then go).
+function doneTalking() {
+  if (tapListening === 'pc') {
+    const key = talkKey;
+    talkStarted.then(() => { if (key === talkKey) fetch(requestUrl('/listen_stop', withTalk({}))).catch(() => {}); });
+    return;
+  }
+  if (talkPhase !== 'quiet' || talkEngine === 'pc') return;
+  talkPhase = 'ending';
+  if (talkEngine === 'app') {
+    if (androidDone) { finishTalk(false); return; }
+    holdApp.doneListening(talkKey);
+  } else if (talkEngine === 'app1') {
+    if (cancelRestart() || androidDone) { finishTalk(false); return; }
     androidSpeech.stopListening();
-    setTimeout(() => { if (afterAndroidSpeech === sendSpoken) sendSpoken(); }, 4000);
-    return;
-  }
-  if (recognition) {
+  } else {
+    if (cancelRestart() || !browserOn) { finishTalk(false); return; }
     try { recognition.stop(); } catch (err) {}
   }
-  setTimeout(sendSpoken, 300);
-});
+  talkLater(() => finishTalk(true), talkEngine === 'browser' ? BROWSER_FINAL_MS : FINAL_WORDS_MS);
+}
+
+// Android cut the hold short: the words wait for one tap on Send it (15 seconds), and nothing runs without it.
+function offerSend(words, params) {
+  talkIdle();
+  say('Send this? “' + (words.length > 120 ? words.slice(0, 120) + '…' : words) + '”');
+  sendHeard = {words, params};
+  sendHeardBtn.classList.add('on');
+  clearTimeout(sendHeardTimer);
+  sendHeardTimer = setTimeout(() => clearSendHeard(true), SEND_IT_MS);
+}
+function sendHeardNow() {
+  const offer = sendHeard;
+  if (!offer) return;
+  clearTimeout(sendHeardTimer);
+  sendHeard = null;
+  sendHeardBtn.classList.remove('on');
+  hush();
+  spokenText = offer.words;
+  say('“' + (offer.words.length > 160 ? '…' + offer.words.slice(-160) : offer.words) + '”');
+  thinkingNow();
+  postHold(offer.params, '', Promise.resolve());
+}
+function clearSendHeard(showHeld) {
+  clearTimeout(sendHeardTimer);
+  if (!sendHeard) return;
+  sendHeard = null;
+  sendHeardBtn.classList.remove('on');
+  if (!showHeld) return;
+  if (heldReply !== null) showHeldReply();
+  else say("Okay, I didn't send it.");
+}
+
+// Settings > Test my voice: the same press with its own button, but what was heard is only shown here.
+const PC_EARS = {pack: 'sharp ears on your PC', gemini: 'Gemini', openai: 'ChatGPT', windows: 'Windows'};
+function heardBy(engine, pcEars) {
+  if (engine === 'app' || engine === 'app1') return "the phone's speech service";
+  if (engine === 'browser') return /Chrome\//.test(navigator.userAgent) ? 'Chrome' : 'this browser';
+  return PC_EARS[pcEars] || 'your PC';
+}
+function voiceResult(words, how, pieces) {
+  if (!words) {
+    voiceHeardEl.textContent = '';
+    voiceHowEl.textContent = androidNote || "I didn't hear anything. Hold the button and say something.";
+  } else {
+    voiceHeardEl.textContent = '“' + words + '”';
+    const parts = ['Heard by ' + how];
+    if (letGoAt) parts.push((Math.max(0, Date.now() - letGoAt) / 1000).toFixed(1) + ' s after you let go');
+    if (pieces > 1) parts.push('in ' + pieces + ' pieces');
+    voiceHowEl.textContent = parts.join(' · ');
+  }
+  afterNoSend();
+}
+function openVoiceCheck() {
+  voiceHeardEl.textContent = '';
+  voiceHowEl.textContent = '';
+  document.getElementById('voiceModal').style.display = 'block';
+  wake();
+}
+function closeVoiceCheck() {
+  if (checkMode && talkPhase !== 'off') dropTalk('');
+  checkMode = false;
+  document.getElementById('voiceModal').style.display = 'none';
+}
+
+const stageEl = document.getElementById('stage');
+stageEl.addEventListener('pointerdown', event => startTalk(event, false, false));
+voiceHoldEl.addEventListener('pointerdown', event => startTalk(event, false, true));
+window.addEventListener('pointerup', letGo);
+window.addEventListener('pointercancel', lostPointer);
+stageEl.addEventListener('lostpointercapture', lostPointer);
+voiceHoldEl.addEventListener('lostpointercapture', lostPointer);
+// A long press brings no menu or text selection, which would take the finger away.
+stageEl.addEventListener('contextmenu', event => event.preventDefault());
+voiceHoldEl.addEventListener('contextmenu', event => event.preventDefault());
+// Leaving the app (Home, the screen going off, a call): see leftPage.
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') leftPage(); });
+window.addEventListener('pagehide', () => dropTalk(LEFT_WORDS));
 
 // The face: its eyes follow the PC's mouse pointer (or look their own way in some moods), it blinks
 // now and then, and its expression follows what Motorcycle Man is doing. Two quiet minutes and it sleeps.
@@ -5149,8 +6263,14 @@ requestAnimationFrame(frame);
 </script>
 </body>
 </html>"""
+# Which Motorcycle Man made the phone page: /status says it ("page"), and a page from before an update reloads itself.
+PAGE_BUILD = hashlib.sha256((PHONE_PAGE + helmet_face.phone_face_css() + helmet_face.mood_look_json()).encode("utf-8")
+                            ).hexdigest()[:10]
+
+
 def build_phone_page(paint: str) -> str:
     return (PHONE_PAGE.replace("/*FACE_CSS*/", helmet_face.phone_face_css())
+            .replace('/*PAGE_BUILD*/""', json.dumps(PAGE_BUILD))
             .replace("<!--FACE_SVG-->", helmet_face.phone_face_svg(paint))
             .replace("/*MOOD_LOOK*/{}", helmet_face.mood_look_json())
             .replace("/*LOOK_REACH*/[5, 4]", json.dumps(list(helmet_face.LOOK_REACH)))
@@ -5180,7 +6300,7 @@ def phone_page() -> str:
     if paint not in _PHONE_PAGES:
         _PHONE_PAGES[paint] = build_phone_page(paint)
     return _PHONE_PAGES[paint]
-PHONE_REQUESTS = {"/status", "/history", "/reminders", "/routines", "/paint", "/shortcut", "/ask", "/pad", "/slides", "/power", "/health", "/find", "/brief", "/hold_start", "/hold_stop", "/listen_stop", "/confirm", "/cmd", "/stop",
+PHONE_REQUESTS = {"/status", "/history", "/reminders", "/routines", "/paint", "/shortcut", "/ask", "/pad", "/slides", "/power", "/health", "/find", "/brief", "/hold_start", "/hold_stop", "/listen_stop", "/words", "/confirm", "/cmd", "/stop", "/resume", "/forget_task",
                   "/app_version", "/app.apk", "/manifest.webmanifest", "/remote", "/clipboard", "/open_link", "/upload", "/files", "/file", "/screen.jpg", "/screen_input", "/screen_sound", "/screenshot.png", "/screen_text", "/windows", "/window_icon", "/guide", "/prefs", "/phone_inbox", "/clip_sync", "/media", "/media_art", "/mixer", "/settings", "/browse", "/guard", "/screen_time", "/focus", "/lists", "/gamepad"}
 
 
@@ -5331,11 +6451,61 @@ def phone_app_info() -> dict:
         return dict(PHONE_APP["info"])
 
 
+RESUME_OFFER_TROUBLE = {"logged": False}  # a broken journal is logged once, not with every status check
+
+
+def resume_offer():
+    # The newest task that stopped halfway and can be picked up (see TaskJournal.offer), or None, as also while a
+    # task runs: then it is the running one's business.
+    return None if TASK_LOCK.locked() else TASKS.offer()
+
+
+def resume_offer_for_ui():
+    # That task as the phone, the window and the tray show it: {id, state, why, words, step, request, ask}.
+    # "Yes, send it" only while the held send still waits for its yes: PENDING_SEND isn't kept over a restart,
+    # and then Resume task plans it again (asking before anything that can't be undone).
+    try:
+        entry = resume_offer()
+        if entry is None:
+            return None
+        task = dict(TASKS.for_ui(entry, send_waiting=send_still_held(entry)))
+    except Exception:
+        # The status check must always answer, or the phone would say it lost the PC.
+        if not RESUME_OFFER_TROUBLE["logged"]:
+            RESUME_OFFER_TROUBLE["logged"] = True
+            LOG.warning("Couldn't read the task that stopped halfway", exc_info=True)
+        return None
+    task.pop("title", None)  # the phone and the window each word their own line (see paused_line)
+    return task
+
+
+def paused_line(task: dict) -> str:
+    # "Paused at step 3: “send Dana the photos”", as the window says it (the phone page has its own pausedLine).
+    where = f" at step {task['step']}" if task.get("step") else ""
+    return f"{'Stuck' if task.get('state') == 'stuck' else 'Paused'}{where}: “{task.get('request', '')}”"
+
+
+def task_offer_changed(bridge):
+    # The window shows a paused task on its status line between tasks (see ControlCenterWindow.show_status): it
+    # looks again after a forget from the phone or the tray, which changes no status of its own.
+    bridge.status_sig.emit(get_task_status()["status"])
+
+
+def forget_paused_task(bridge, task_id=None, buddy=False) -> str:
+    # The phone's Forget it and the tray's Forget the paused task: dropped (see forget_task), and gone from the
+    # window. From the tray the buddy says so; the phone shows the reply itself.
+    reply = forget_task(task_id)
+    task_offer_changed(bridge)
+    if buddy:
+        bridge.say_sig.emit(reply, 4000)
+    return reply
+
+
 def phone_status() -> dict:
-    # What the phone page asks for several times a second, with the version of the app the PC has and this
-    # PC's name (for a phone that uses several PCs).
+    # What the phone page asks for several times a second, with the version of the app the PC has, this PC's
+    # name (for a phone that uses several PCs) and the task that stopped halfway, if any (see showPaused).
     return dict(get_task_status(), app_version=phone_app_info().get("versionCode", 0), pc=hello_info()["name"],
-                paint=paint_jobs.current())
+                paint=paint_jobs.current(), page=PAGE_BUILD, task=resume_offer_for_ui())
 
 
 # Siri and iMessage on an iPhone (no app needed): the Shortcuts app sends what was said, or a text message that
@@ -5663,6 +6833,7 @@ class Bridge(QObject):
     phone_notice_sig = Signal(object)  # a message on the phone that can be answered from the PC: {"id", "app", "title", "text"}
     phone_done_sig = Signal(str, bool)  # whether the phone sent the PC's answer to that message
     laser_sig = Signal(float, float)  # the laser pointer's place on the screen (0 to 1 across and down), or -1 for off
+    hearing_sig = Signal(str, str)  # sharp ears' download (see get_sharper_ears): its state and the detail
 
 
 BUDDY_HIDDEN_FROM_SCREENSHOTS = False  # set once Windows agrees to keep the buddy out of screenshots
@@ -7454,6 +8625,8 @@ QLabel#rowname { color: #8B95C9; font-weight: 700; }
 QPushButton#toggle { background: #1C2550; color: #94A3B8; border: 1px solid #2E3A72; padding: 7px 14px; }
 QPushButton#toggle:checked { background: rgba(255,200,61,0.14); color: #FFC83D; border-color: #FFC83D; }
 QLabel#link { color: #93C5FD; font-size: 11px; }
+QPushButton#link { background: transparent; color: #93C5FD; border: none; padding: 0 2px; font-size: 11px; font-weight: 600; }
+QPushButton#link:hover { color: #BFDBFE; }
 QFrame#card { background: #121A3A; border: 1px solid #232D5C; border-radius: 16px; }
 QPushButton { font-family: 'Segoe UI'; font-size: 13px; font-weight: 700; border-radius: 11px; padding: 9px 16px; }
 QPushButton#primary { background: #FFC83D; color: #1A1305; border: none; }
@@ -8643,9 +9816,11 @@ class ControlCenterWindow(QMainWindow):
     # Motorcycle Man's window on the PC: its face and status, the phone's QR code and link, the Gemini key,
     # Telegram, and a box to try a command.
     def __init__(self, ip: str, bridge: Bridge, trigger_cmd, port=PORT, token=None, internet=None, telegram=None, chats=None,
-                 bluetooth=None):
+                 bluetooth=None, resume_cmd=None):
         super().__init__()
         self.ip = ip
+        # resume_cmd(task_id) picks up a task that stopped halfway (see resume_paused); offered: the one shown now.
+        self.resume_cmd, self.offered = resume_cmd, None
         self.port = int(port)
         self.bridge, self.internet, self.telegram = bridge, internet, telegram
         self.chats = chats if chats is not None else {}
@@ -8756,8 +9931,10 @@ class ControlCenterWindow(QMainWindow):
         self.show_internet("off", "")
 
         setup, box = self._card("SET UP")
-        self.key_lbl, self.key_btn = self._setting_row(box, "AI", self.prompt_key)
+        self._ai_row(box)
         self.show_key_state()
+        bridge.hearing_sig.connect(self.show_hearing)
+        self.show_hearing()
         if telegram is not None:
             self.connect_lbl, self.connect_btn = self._setting_row(box, "Connect", self.open_connections)
             bridge.telegram_sig.connect(self.show_connections)
@@ -8802,17 +9979,28 @@ class ControlCenterWindow(QMainWindow):
         run_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         run_btn.clicked.connect(lambda: trigger_cmd(self.test_input.text()))
         row.addWidget(run_btn)
+        # A task that stopped halfway is picked up from here; show_status shows the button between tasks (the
+        # window keeps its size: the box makes room).
+        self.resume_btn = QPushButton("Resume task")
+        self.resume_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.resume_btn.setStyleSheet("QPushButton { background: #34D399; color: #052E1F; border: none; }"
+                                      "QPushButton:hover { background: #6EE7B7; }")
+        self.resume_btn.clicked.connect(self.resume_paused)
+        self.resume_btn.hide()
+        row.addWidget(self.resume_btn)
         box.addLayout(row)
         layout.addWidget(command)
 
         layout.addStretch(1)
         self.status_lbl = QLabel("Ready")
         self.status_lbl.setObjectName("status")
+        self.status_lbl.setTextFormat(Qt.TextFormat.PlainText)  # it can show a request, which is never HTML
         self.status_lbl.setWordWrap(True)
         layout.addWidget(self.status_lbl)
         bridge.status_sig.connect(self.show_status)
         bridge.mood_sig.connect(self.face.set_mood)
         self.show_status("Status: Ready!")
+        self.hearing_note()
         self.confirm_boxes = {}
 
     @staticmethod
@@ -8849,6 +10037,37 @@ class ControlCenterWindow(QMainWindow):
         row.addWidget(button)
         box.addLayout(row)
         return label, button
+
+    def _ai_row(self, box):
+        # SET UP's AI line, with how this PC's microphone is heard under it (a small line, so the window keeps its
+        # size): the AI and its Change / Add key button, then the hearing words and their own small button.
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(self._row_name("AI"))
+        middle = QVBoxLayout()
+        middle.setSpacing(1)
+        self.key_lbl = QLabel()
+        self.key_lbl.setWordWrap(True)
+        middle.addWidget(self.key_lbl)
+        ears = QHBoxLayout()
+        ears.setSpacing(6)
+        self.hearing_lbl = QLabel()
+        self.hearing_lbl.setWordWrap(True)
+        ears.addWidget(self.hearing_lbl, 1)
+        self.hearing_btn = QPushButton()
+        self.hearing_btn.setObjectName("link")
+        self.hearing_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.hearing_btn.setToolTip("Free and offline (whisper.cpp). About 60 MB. Nothing is sent anywhere.")
+        self.hearing_btn.clicked.connect(self.hearing_button)
+        ears.addWidget(self.hearing_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        middle.addLayout(ears)
+        row.addLayout(middle, 1)
+        self.key_btn = QPushButton()
+        self.key_btn.setObjectName("secondary")
+        self.key_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.key_btn.clicked.connect(self.prompt_key)
+        row.addWidget(self.key_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        box.addLayout(row)
 
     def _toggle(self, text: str, setting: str, tip: str, changed, default: bool = True):
         # A switch kept in settings.json; changed(on) follows each flip (turning one on gives a taste of it).
@@ -8988,13 +10207,41 @@ class ControlCenterWindow(QMainWindow):
     def show_status(self, status: str):
         text = re.sub(r"^Status:\s*", "", str(status)).rstrip("!")
         ready = text.lower().startswith("ready")
-        self.status_lbl.setText((text or "Ready") + ("  ·  Ctrl+Alt+M to talk" if ready and HOTKEY["ready"] else ""))
-        color, back = ("#6EE7B7", "rgba(52,211,153,0.14)") if ready else ("#FCD34D", "rgba(245,158,11,0.16)")
-        self.pill.setText("● Ready" if ready else "● Working")
+        # Between tasks, one that stopped halfway shows until it is picked up, forgotten or too old to pick up.
+        task = resume_offer_for_ui() if ready else None
+        self.offered = task
+        if task is not None:
+            stuck = task["state"] == "stuck"
+            self.status_lbl.setText(f"{paused_line(task)}  ·  {task['words']}")
+            color, back = ("#FDA4AF", "rgba(251,113,133,0.16)") if stuck else ("#FFD66B", "rgba(255,200,61,0.16)")
+            self.pill.setText("● Stuck" if stuck else "● Paused")
+            self.resume_btn.setText(task["ask"])
+            self.resume_btn.setToolTip(f"Pick up “{task['request']}” where it stopped")
+        else:
+            talk = "  ·  Ctrl+Alt+M to talk" if ready and HOTKEY["ready"] else ""
+            self.status_lbl.setText((text or "Ready") + talk)
+            color, back = ("#6EE7B7", "rgba(52,211,153,0.14)") if ready else ("#FCD34D", "rgba(245,158,11,0.16)")
+            self.pill.setText("● Ready" if ready else "● Working")
+        self.resume_btn.setVisible(task is not None and self.resume_cmd is not None)
         self.pill.setStyleSheet(f"color: {color}; background: {back}; border-radius: 12px; padding: 5px 12px; "
                                 "font-weight: 700; font-size: 12px;")
         if ready:
-            QTimer.singleShot(4000, lambda: self.face.set_mood("idle") if self.pill.text() == "● Ready" else None)
+            if task is None and TASK_LOCK.locked():
+                QTimer.singleShot(300, self.refresh_resume)  # the task that just ended is still letting go
+            QTimer.singleShot(4000, lambda: self.face.set_mood("idle") if self.pill.text() != "● Working" else None)
+
+    def refresh_resume(self):
+        # Looks again (with the tray's tip, and just after a task ends): a paused task shows up, is picked up or
+        # forgotten elsewhere, or gets too old. Other words on the status line stay while nothing changed.
+        if self.pill.text() != "● Working" and resume_offer_for_ui() != self.offered:
+            self.show_status("Status: Ready!")
+
+    def resume_paused(self):
+        # The Resume task button: picks up the task shown, on a worker thread like Run.
+        task = self.offered
+        if task is not None and self.resume_cmd is not None:
+            self.resume_btn.hide()
+            self.resume_cmd(task["id"])
 
     def show_internet(self, state: str, detail: str):
         # The "away from home" line, and the QR code, which carries the internet link while it is on.
@@ -9054,6 +10301,89 @@ class ControlCenterWindow(QMainWindow):
         self.key_lbl.setText(words)
         self.key_lbl.setStyleSheet(f"color: {'#6EE7B7' if saved else '#FCD34D'}; font-weight: 600;")
         self.key_btn.setText("Change" if saved else "Add key")
+
+    def show_hearing(self, state: str = "", detail: str = ""):
+        # The hearing line under SET UP's AI: which way writes down what is said into this PC's microphone, and sharp
+        # ears' setting up: state "progress" (detail: its percent), "checking", "ready", "failed" (detail: why), or ""
+        # for how it stands. What doesn't fit the line (ready, why it failed) goes on the status line, as the wake
+        # word's news does. Get sharper ears shows only when this version has a pinned pack to offer, and never
+        # mid-download; with sharp ears set up, Change opens their menu (see hearing_menu).
+        if state in ("progress", "checking"):
+            words = f"Downloading sharper ears… {detail}%" if state == "progress" else "Testing my new ears…"
+            self._hearing_row(words, "#FCD34D", "")
+            return
+        if state == "ready":
+            self.status_lbl.setText("Sharp ears ready! Your voice now stays on this PC.")
+        elif state == "failed":
+            self.status_lbl.setText(f"Couldn't get sharper ears: {detail}. Nothing was changed.")
+        offered = speech_pack.available()
+        provider = ai_provider()
+        # The AI that hear() would hand a recording to: the user's Gemini or ChatGPT, with its key.
+        listener = {"gemini": "Gemini", "openai": "ChatGPT"}.get(provider) if ai_key(provider) else None
+        if SPEECH_PACK.sick():
+            self._hearing_row("Hearing: sharp ears had a problem", "#FCA5A5", "Repair")
+        elif SPEECH_PACK.installed():
+            if listener and load_settings().get("hearing_ai_fallback", False):
+                self._hearing_row(f"Hearing: ✓ sharp ears, then {listener}", "#6EE7B7", "Change")
+            else:
+                self._hearing_row("Hearing: ✓ sharp ears · stays on this PC", "#6EE7B7", "Change")
+        else:
+            if listener == "Gemini":
+                words = "Hearing: Gemini · your voice goes to Google"
+            elif listener == "ChatGPT":
+                words = "Hearing: ChatGPT · your voice goes to OpenAI"
+            else:
+                words = "Hearing: Windows · basic"
+            self._hearing_row(words, "#94A3B8", "Get sharper ears" if offered else "")
+
+    def _hearing_row(self, words: str, color: str, button: str):
+        self.hearing_lbl.setText(words)
+        self.hearing_lbl.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: 600;")
+        self.hearing_btn.setText(button)
+        self.hearing_btn.setVisible(bool(button))
+
+    def hearing_note(self, before: str = ""):
+        # Once, for Claude and the other AIs that can't listen (Windows' own listening writes down their voice
+        # commands): on the status line, after before ("Claude saved. "), until the next status. Never over a
+        # paused task's line (see show_status): then it waits for another time.
+        if (getattr(self, "offered", None) is None and speech_pack.available() and not SPEECH_PACK.installed()
+                and ai_provider() in ("claude", "compatible") and not load_settings().get("hearing_note_seen")):
+            self.status_lbl.setText(f"{before}Windows' own listening often mishears. Free sharp ears hear you much better.")
+            save_setting("hearing_note_seen", True)
+
+    def hearing_button(self):
+        # Get sharper ears or Repair (on a thread of its own, see get_sharper_ears), or Change (sharp ears' menu).
+        if self.hearing_btn.text() == "Change":
+            self.hearing_menu().exec(self.hearing_btn.mapToGlobal(self.hearing_btn.rect().bottomLeft()))
+            return
+        self.show_hearing("progress", "0")
+        threading.Thread(target=get_sharper_ears, args=(self.bridge,), name="sharp ears", daemon=True).start()
+
+    def hearing_menu(self):
+        # Sharp ears' menu: whether the user's AI may write down what they couldn't, and Remove.
+        menu = QMenu(self)
+        menu.setStyleSheet("QMenu { background: #121A3A; color: #F8FAFC; border: 1px solid #2E3A72; padding: 6px; }"
+                           "QMenu::item { padding: 7px 18px 7px 10px; border-radius: 8px; }"
+                           "QMenu::item:selected { background: #24306A; }")
+        fallback = menu.addAction(HEARING_AI_FALLBACK)
+        fallback.setCheckable(True)
+        fallback.setChecked(bool(load_settings().get("hearing_ai_fallback", False)))
+        fallback.toggled.connect(self.hearing_fallback)
+        menu.addAction("Remove sharp ears").triggered.connect(self.remove_sharp_ears)
+        return menu
+
+    def hearing_fallback(self, on: bool):
+        save_setting("hearing_ai_fallback", bool(on))
+        self.status_lbl.setText("Okay. If sharp ears fail, your AI writes it down." if on
+                                else "Okay. Your voice stays on this PC.")
+        self.show_hearing()
+
+    def remove_sharp_ears(self):
+        try:
+            SPEECH_PACK.remove()
+        except speech_pack.PackError as exc:
+            self.status_lbl.setText(f"Couldn't remove sharp ears: {exc}.")
+        self.show_hearing()
 
     def telegram_status(self):
         bot, state, detail = self.telegram.bot, self.telegram.state, self.telegram.detail
@@ -9191,6 +10521,8 @@ class ControlCenterWindow(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.status_lbl.setText(f"{ai_name()} saved")
             self.show_key_state()
+            self.show_hearing()
+            self.hearing_note(f"{ai_name()} saved. ")
 
 
 def get_known_folder_paths(home=None):
@@ -9519,15 +10851,22 @@ def call_gemini_planner(parts: list, api_key: str) -> dict:
     return ask_ai(payload, read_plan, timeout=PLANNER_TIMEOUT_SECONDS, thinking=THINKING_LEVELS, api_key=api_key)
 
 
-TRANSCRIBE_MODELS = ["gemini-3.5-flash-lite", "gemini-flash-lite-latest", "gemini-3.6-flash", "gemini-3.5-flash"]
+# The models that write down what was said, a list of their own (not the planner's GEMINI_MODELS): the quick ones,
+# so a spoken command waits as little as it can. It starts with flash-lite-latest, which the planner asks second,
+# so writing down and then planning one command don't both spend the first model's free limit (each model has its
+# own, unless Google points "latest" at that same model). A model that says "quota exceeded" rests for both lists
+# (RESTING_MODELS, in ask_gemini). The order changes only when measured clips agree.
+TRANSCRIBE_MODELS = ["gemini-flash-lite-latest", "gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-3.5-flash"]
 
 
 # Through events: a plain Recognize() on a recording never came back on this PC (October 2026); the events end
-# with the recording.
+# with the recording. In US English, the language the phone's page listens in, when Windows has it; otherwise in
+# Windows' own language.
 WINDOWS_DICTATION = r"""
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 Add-Type -AssemblyName System.Speech
-$engine = New-Object System.Speech.Recognition.SpeechRecognitionEngine
+try { $engine = [System.Speech.Recognition.SpeechRecognitionEngine]::new([System.Globalization.CultureInfo]::new('en-US')) }
+catch { $engine = [System.Speech.Recognition.SpeechRecognitionEngine]::new() }
 $engine.LoadGrammar((New-Object System.Speech.Recognition.DictationGrammar))
 $engine.SetInputToWaveFile($env:MM_WAVE)
 Register-ObjectEvent $engine SpeechRecognized -SourceIdentifier mmHeard | Out-Null
@@ -9549,7 +10888,7 @@ $engine.Dispose()
 
 def windows_dictation(wav_bytes: bytes) -> str:
     # Windows' own speech recognition (free and offline) writes down a recording, for an AI that can't listen to
-    # one (Claude, and most OpenAI-compatible services). "" when it heard no words.
+    # one (Claude, and most OpenAI-compatible services), or with no AI key yet. "" when it heard no words.
     import tempfile
     handle, path = tempfile.mkstemp(suffix=".wav")
     try:
@@ -9569,40 +10908,169 @@ def windows_dictation(wav_bytes: bytes) -> str:
     return words[:500] if re.search(r"[^\W\d_]", words) else ""
 
 
-def transcribe_speech(wav_bytes: bytes, api_key: str, mime_type: str = "audio/wav") -> str:
-    # The words in a recording from the PC's microphone (or a Telegram voice message, "audio/ogg"),
-    # written down by a quick model ("" when nobody spoke), so a spoken command is handled like a typed one.
-    # Gemini listens to it; ChatGPT has its own speech-to-text; for the other AIs Windows writes it down.
-    provider = ai_provider()
-    if provider == "openai":
-        try:
-            return stoppable(ai_providers.transcribe_openai, ai_key("openai"), wav_bytes, mime_type)[:500]
-        except ai_providers.AiError as exc:
-            if mime_type != "audio/wav":
-                raise RuntimeError(str(exc)) from None
-            LOG.warning("ChatGPT couldn't write down the recording (%s); Windows will", exc)
-    if provider != "gemini":
-        if mime_type != "audio/wav":
-            raise RuntimeError("Voice messages need Gemini or ChatGPT as Motorcycle Man's AI. Type it instead.")
-        return stoppable(windows_dictation, wav_bytes)
+# Sharp ears (see speech_pack.py): free speech-to-text on this PC, set up only when the user asks in the window.
+# Once they are set up, what is said into this PC's microphone stays on this PC: sharp ears, then Windows. The
+# user's AI hears it only when they turn on "If sharp ears fail, use my AI" (the "hearing_ai_fallback" setting, off
+# at first; in the window's AI row).
+SPEECH_PACK = speech_pack.SpeechPack(lambda: os.path.join(app_data_dir(), "speech"))
+HEARING_AI_FALLBACK = "If sharp ears fail, use my AI"
+HEARING_NAMES = {"pack": "sharp ears", "openai": "ChatGPT", "gemini": "Gemini", "windows": "Windows"}
+HEARING_WORDS_LIMIT, HEARING_WORD_LENGTH, HEARING_PROMPT_LENGTH = 50, 40, 400
+
+
+def hearing_words() -> list:
+    # Names the user may well say, for the ears to expect (Gemini's prompt, sharp ears' prompt, the phone's hints):
+    # Motorcycle Man, the routines' names, and the apps (from the Start menu list already kept, so a command never
+    # waits for Windows to list them) that recent requests named. At most 50, each at most 40 characters.
+    words, seen = [], set()
+
+    def add(name):
+        name = " ".join(str(name).split())
+        if name and len(name) <= HEARING_WORD_LENGTH and name.lower() not in seen and len(words) < HEARING_WORDS_LIMIT:
+            seen.add(name.lower())
+            words.append(name)
+
+    add("Motorcycle Man")
+    try:
+        for routine in ROUTINES.all():
+            add(routine.get("name", ""))
+    except Exception:
+        LOG.warning("Couldn't read the routines' names", exc_info=True)
+    shown = dict(_START_APPS.get("names") or {})  # the names as the Start menu shows them
+    apps = [(shown.get(name, name), " ".join(re.findall(r"[a-z0-9']+", name))) for name in list(_START_APPS["apps"])]
+    for entry in reversed(load_history()[-200:]):  # the newest requests first
+        said = " " + " ".join(re.findall(r"[a-z0-9']+", str(entry.get("request", "")).lower())) + " "
+        for name, plain in apps:
+            if plain and f" {plain} " in said:
+                add(name)
+    return words
+
+
+def hearing_prompt(words=None) -> str:
+    # The names as one line, at most 400 characters, cut between names.
+    line = ""
+    for word in hearing_words() if words is None else words:
+        longer = f"{line}, {word}" if line else word
+        if len(longer) > HEARING_PROMPT_LENGTH:
+            break
+        line = longer
+    return line
+
+
+def recording_speech_seconds(wav_bytes: bytes):
+    # How long someone talks in a WAV recording (None for anything else), for sharp ears' check on made-up words.
+    levels = recording_levels(wav_bytes)
+    return sum(last - first + 1 for first, last in speech_runs(levels)) * 0.05 if levels else None
+
+
+def gemini_hears(wav_bytes: bytes, api_key: str, mime_type: str, words: list) -> str:
+    # Gemini writes down a recording with the user's own key, through the quick models of TRANSCRIBE_MODELS (not
+    # the planner's list), with the names it may hear.
+    names = hearing_prompt(words)
     payload = {
         "contents": [{"parts": [
             {"inline_data": {"mime_type": mime_type, "data": base64.b64encode(wav_bytes).decode("ascii")}},
-            {"text": "This recording may be someone giving a spoken command to a computer assistant. Reply with "
-                     "exactly the words they say and nothing else. If no words are clearly spoken (silence, noise, "
-                     "breathing), or you are unsure, reply with exactly: (none)"}]}],
+            {"text": "This recording may be someone giving a spoken command to Motorcycle Man, a computer assistant. "
+                     "Reply with exactly the words they say and nothing else."
+                     + (f" Names they may say: {names}." if names else "")
+                     + " If a word is unclear, write your best guess of it. If no words are spoken at all (silence, "
+                       "noise, breathing), reply with exactly: (none)"}]}],
         "generationConfig": {"temperature": 0, "maxOutputTokens": 200},
     }
 
     def read_words(data, model_id):
         candidates = data.get("candidates") or []
         content_parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
-        words = " ".join("".join(p.get("text", "") for p in content_parts if "text" in p).split()).strip(" \"'")
-        if re.fullmatch(r"[\[(].*[\])]", words) or not re.search(r"[^\W\d_]", words):
+        heard = " ".join("".join(p.get("text", "") for p in content_parts if "text" in p).split()).strip(" \"'")
+        if re.fullmatch(r"[\[(].*[\])]", heard) or not re.search(r"[^\W\d_]", heard):
             return ""  # "(none)", "[silence]", or "00:00" for a quiet room
-        return words[:500]
+        return heard[:500]
 
     return ask_gemini(payload, api_key, read_words, TRANSCRIBE_MODELS, timeout=15, thinking=THINKING_LEVELS)
+
+
+def hearing_may_use_ai(mime_type: str = "audio/wav") -> bool:
+    # Whether a recording may go to the user's AI to be written down: always without sharp ears (and for a
+    # Telegram voice message, which sharp ears can't take), and with them only when the user said so.
+    return (mime_type != "audio/wav" or not SPEECH_PACK.installed()
+            or bool(load_settings().get("hearing_ai_fallback", False)))
+
+
+def hear(wav_bytes: bytes, api_key: str, mime_type: str = "audio/wav") -> tuple:
+    # (the words in a recording, which way wrote them down: "pack", "openai", "gemini" or "windows"). Each way is
+    # tried in turn until one answers ("" when nobody spoke is an answer); a failure moves on to the next:
+    # sharp ears (WAV only, when set up and well), ChatGPT (when it is the user's AI), Gemini (when it is, with the
+    # user's free key), then Windows (WAV only). With sharp ears set up, the AIs are asked only when the user turned
+    # on HEARING_AI_FALLBACK (see hearing_may_use_ai). No AI key is needed: sharp ears or Windows write it down.
+    # RuntimeError when no way could.
+    wav = mime_type == "audio/wav"
+    provider, cloud = ai_provider(), hearing_may_use_ai(mime_type)
+    ways = ["pack"] if wav and SPEECH_PACK.ready() else []
+    if cloud and provider == "openai" and ai_key("openai"):
+        ways.append("openai")
+    if cloud and provider == "gemini" and api_key:
+        ways.append("gemini")
+    if wav:
+        ways.append("windows")
+    if not ways:
+        raise RuntimeError("Voice messages need Gemini or ChatGPT as Motorcycle Man's AI. Type it instead.")
+    words, problem = None, ""
+    for way in ways:
+        began = time.monotonic()
+        try:
+            if way == "pack":
+                job = speech_pack.Job()
+                try:
+                    words = stoppable(SPEECH_PACK.transcribe, wav_bytes, hearing_prompt(),
+                                      recording_speech_seconds(wav_bytes), job=job)
+                except TaskStopped:
+                    SPEECH_PACK.cancel(job)  # whisper-cli stops too, rather than finishing for nobody
+                    raise
+            elif way == "openai":
+                words = stoppable(ai_providers.transcribe_openai, ai_key("openai"), wav_bytes, mime_type)[:500]
+            elif way == "gemini":
+                words = gemini_hears(wav_bytes, api_key, mime_type, hearing_words())
+            else:
+                words = stoppable(windows_dictation, wav_bytes)
+        except RuntimeError as exc:  # ai_providers.AiError and speech_pack.PackError are RuntimeErrors too
+            problem = str(exc)
+            LOG.warning("%s couldn't write down the recording (%s)%s", HEARING_NAMES[way], exc,
+                        "" if way == ways[-1] else "; the next way will")
+            continue
+        LOG.info("Written down by %s in %.1f s", HEARING_NAMES[way], time.monotonic() - began)  # never the words
+        return words, way
+    raise RuntimeError(problem or "Nothing could write down the recording.")
+
+
+def transcribe_speech(wav_bytes: bytes, api_key: str, mime_type: str = "audio/wav") -> str:
+    # The words in a recording from the PC's microphone (or a Telegram voice message, "audio/ogg"), written down
+    # ("" when nobody spoke), so a spoken command is handled like a typed one. See hear for the ways it tries.
+    return hear(wav_bytes, api_key, mime_type)[0]
+
+
+def get_sharper_ears(bridge):
+    # The window's Get sharper ears (or Repair): sharp ears are downloaded, checked and tried on a thread of their
+    # own, with the progress in the window's Hearing row (bridge.hearing_sig). Nothing changes when it fails.
+    shown = {"percent": -1}
+
+    def progress(done, total):
+        percent = min(99, int(done * 100 / total)) if total else 0
+        if percent != shown["percent"]:
+            shown["percent"] = percent
+            bridge.hearing_sig.emit("progress", str(percent))
+
+    try:
+        info = SPEECH_PACK.install(progress, lambda: bridge.hearing_sig.emit("checking", ""))
+    except speech_pack.PackError as exc:
+        LOG.warning("Couldn't get sharper ears: %s", exc)
+        bridge.hearing_sig.emit("failed", str(exc))
+        return
+    except Exception as exc:
+        LOG.warning("Couldn't get sharper ears", exc_info=True)
+        bridge.hearing_sig.emit("failed", f"something went wrong ({type(exc).__name__})")
+        return
+    LOG.info("Sharp ears are ready (%.2f s to write down a second of talking)", info.get("speed", 0.0))
+    bridge.hearing_sig.emit("ready", "")
 
 
 # Research: Motorcycle Man searches the web itself, without a key, through Bing's results feed, and the AI reads
@@ -9655,10 +11123,6 @@ def research_request(text: str):
     if len(question) < 3 or more_steps or set(words_of(question)) & REFERRING_WORDS:
         return None
     return question
-
-
-def html_words(fragment: str) -> str:
-    return " ".join(html.unescape(re.sub(r"<.*?>", "", fragment)).split())
 
 
 def search_results_from_bing(feed: str) -> list:
@@ -10317,6 +11781,8 @@ def screen_text_reply(cmd: str):
     text = re.sub(r"^" + QUICK_FILLER, "", " ".join(plain_words(str(cmd).replace("’", "'"))))
     if not SCREEN_TEXT_REQUEST.fullmatch(text):
         return None
+    if getattr(GUEST_COMMAND, "name", None):
+        return "Only the owner can read the screen."
     try:
         words = screen_text()
     except pc_ocr.Unavailable as exc:
@@ -11308,7 +12774,7 @@ def find_request(q: dict) -> dict:
         if asked == "folder":
             subprocess.Popen(["explorer.exe", "/select,", path])
             return {"say": "Showing it in its folder on the PC."}
-        if os.path.splitext(path)[1].lower() in RUNNABLE_EXTENSIONS:
+        if runs_a_program(path):
             return {"say": "That one runs a program, so open it at the PC."}
         os.startfile(path)
         LOG.info("Opened a found file from the phone")
@@ -11799,9 +13265,16 @@ def validate_action(action, image_width: int, image_height: int, control_ids=())
             raise ValueError(f"{kind}.{field} must be text of at most {limit} characters.")
         return value
 
-    def full_path(field):
-        if not os.path.isabs(os.path.expandvars(os.path.expanduser(text(field, 1000).strip()))):
+    def full_path(field, changes=True):
+        value = os.path.expandvars(os.path.expanduser(text(field, 1000).strip()))
+        if not os.path.isabs(value):
             raise ValueError(f"{kind}.{field} must be a full path such as C:\\Users\\...")
+        plain = value.replace("/", "\\")
+        # No device paths and no "name:stream" (x.bat::$DATA writes x.bat past the runs-a-program question).
+        if plain.startswith(("\\\\?\\", "\\\\.\\")) or ":" in os.path.splitdrive(plain)[1]:
+            raise ValueError(f"{kind}.{field} must be a plain file path, without ':' after the drive letter.")
+        if private_path(value, holds=changes):
+            raise ValueError(f"{kind}.{field} is in Motorcycle Man's own folder, which tasks can't open or change.")
 
     def key(name):
         if not isinstance(name, str) or (canonical_key(name) not in VK_MAP and len(name) != 1):
@@ -11839,7 +13312,9 @@ def validate_action(action, image_width: int, image_height: int, control_ids=())
         text("query", 500)
     elif kind == "research":
         text("question", 500)
-    elif kind in ("open_path", "create_folder", "delete_file"):
+    elif kind in ("open_path", "create_folder"):
+        full_path("path", changes=False)
+    elif kind == "delete_file":
         full_path("path")
     elif kind == "write_file":
         full_path("path")
@@ -11913,7 +13388,11 @@ def validate_action_plan(plan, image_width: int, image_height: int, control_ids=
 RUNNABLE_EXTENSIONS = {
     ".exe", ".com", ".bat", ".cmd", ".ps1", ".psm1", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".hta",
     ".msi", ".msp", ".scr", ".pif", ".cpl", ".msc", ".lnk", ".url", ".reg", ".jar", ".py", ".pyw",
+    ".pyz", ".pyzw", ".pyc", ".sh", ".ahk", ".pl", ".rb", ".php", ".vb", ".ws", ".wsc", ".sct", ".scf", ".psd1",
+    ".ps1xml", ".inf", ".chm", ".rdp", ".application", ".appref-ms", ".appx", ".msix", ".appinstaller", ".jnlp",
+    ".library-ms", ".theme", ".settingcontent-ms", ".diagcab", ".gadget", ".xll", ".docm", ".xlsm", ".pptm",
 }
+GUEST_ASKS = {"open_path", "create_folder", "write_file", "copy_file", "move_file", "rename_file"}
 SHELL_WORDS = {"cmd", "powershell", "pwsh", "terminal", "wt", "bash", "wsl", "prompt"}
 RISKY_KEY_COMBOS = [
     ({"win", "r"}, "Open the Run box (Win+R)? It can run any command."),
@@ -11928,11 +13407,41 @@ def full_action_path(value) -> str:
     return os.path.abspath(os.path.expandvars(os.path.expanduser(str(value).strip())))
 
 
+def network_path(value) -> bool:
+    # \\server\share (and //server/share): touching one makes Windows sign in to that server.
+    return full_action_path(value).startswith("\\\\")
+
+
+def private_path(value, holds: bool = True) -> bool:
+    # Motorcycle Man's own folder (the keys, the phone's link secret, the settings, the tunnel programs) and
+    # anything in it; with holds, a folder that holds it too, so it can't be moved or deleted from above.
+    if network_path(value):
+        return False
+
+    def norm(path):
+        return os.path.normcase(os.path.realpath(path)).rstrip("\\/")
+
+    try:
+        own, target = norm(app_data_dir()), norm(full_action_path(value))
+    except (OSError, ValueError):
+        return True
+    return target == own or target.startswith(own + os.sep) or (holds and own.startswith(target + os.sep))
+
+
+def runs_a_program(path: str) -> bool:
+    name = os.path.basename(str(path)).split(":")[0].rstrip(". ")
+    return os.path.splitext(name)[1].lower() in RUNNABLE_EXTENSIONS
+
+
 def file_change_reason(path: str):
+    if network_path(path):
+        return f"Write to the network place {path}? It leaves this PC."
     if os.path.exists(path):
         return f"Overwrite {path}?"
-    if os.path.splitext(path)[1].lower() in RUNNABLE_EXTENSIONS:
+    if runs_a_program(path):
         return f"Create {path}? Files of this type can run programs."
+    if "\\start menu\\programs\\startup\\" in os.path.normcase(path) + "\\":
+        return f"Create {path}? Windows opens what is in this folder each time you sign in."
     return None
 
 
@@ -11949,22 +13458,45 @@ def looks_like_command(text: str) -> bool:
     return bool(name_words(text) & SHELL_WORDS or re.search(r"[\\/:|&<>]", text))
 
 
+def command_like(text: str) -> bool:
+    # Words that Start search or File Explorer's address bar would run rather than look up.
+    words = str(text).strip().strip('"').split()
+    first = words[0].strip('"') if words else ""
+    return bool(looks_like_command(text) or "\n" in str(text) or runs_a_program(first) or (first and shutil.which(first)))
+
+
 def risky_action_reason(action: dict):
     # Returns the question to ask before running this action, or None when it can run without asking.
+    # A guest's file actions always ask: what a guest opens or copies is the owner's call.
+    reason = plain_risky_action_reason(action)
+    guest = getattr(GUEST_COMMAND, "name", None)
+    if reason is None and guest and action["type"] in GUEST_ASKS:
+        what = action.get("path") or f"{action.get('source')} to {action.get('destination')}"
+        return f"{guest} (a guest) wants to {action['type'].replace('_', ' ')}: {str(what)[:300]}. Allow it?"
+    return reason
+
+
+def plain_risky_action_reason(action: dict):
     kind = action["type"]
     if kind == "delete_file":
         path = full_action_path(action["path"])
-        return f"Delete {path}{' and everything in it' if os.path.isdir(path) else ''}?"
+        return f"Delete {path}{' and everything in it' if not network_path(path) and os.path.isdir(path) else ''}?"
     if kind == "write_file":
         return file_change_reason(full_action_path(action["path"]))
     if kind in ("copy_file", "move_file", "rename_file"):
-        dest = full_action_path(action["destination"])
+        source, dest = full_action_path(action["source"]), full_action_path(action["destination"])
+        if network_path(source) or network_path(dest):  # asked before anything touches the network
+            return f"{kind.split('_')[0].capitalize()} {source} to {dest}? One of them is a network place."
         if os.path.isdir(dest):
-            dest = os.path.join(dest, os.path.basename(full_action_path(action["source"])))
+            dest = os.path.join(dest, os.path.basename(source))
         return file_change_reason(dest)
     if kind == "open_path":
         path = full_action_path(action["path"])
-        return f"Run {path}?" if os.path.splitext(path)[1].lower() in RUNNABLE_EXTENSIONS else None
+        if network_path(path):
+            return f"Open the network place {path}? Windows signs in to that computer to open it."
+        return f"Run {path}?" if runs_a_program(path) else None
+    if kind == "create_folder" and network_path(action["path"]):
+        return f"Make a folder on the network place {full_action_path(action['path'])}?"
     if kind == "open_app":
         return launch_risk_reason(action["app"])
     if kind == "system_control":
@@ -11986,9 +13518,11 @@ def risky_action_reason(action: dict):
                 return question
     if kind in ("type_text", "hotkey", "press_key", "key_down"):
         where = foreground_window_kind()
-        if where == "Start search":
-            if kind == "type_text" and looks_like_command(action["text"]):
-                return f"Type '{action['text'][:120]}' into Start search? Windows may run it as a command."
+        if where in ("Start search", "File Explorer"):
+            words = action["text"] if kind == "type_text" else ""
+            if command_like(words) and not (where == "File Explorer" and "\n" not in words
+                                            and os.path.isdir(os.path.expandvars(words.strip().strip('"')))):
+                return f"Type '{words[:120]}' into {where}? Windows may run it as a command."
         elif where:
             what = f"type '{action['text'][:120]}'" if kind == "type_text" else "press keys"
             return f"Let Motorcycle Man {what} in the {where}? Anything entered there can run as a command."
@@ -12004,7 +13538,7 @@ DEFAULT_SAY = {
 }
 SEND_CONTROL = re.compile(r"(send|post|tweet|submit|publish|run)(?: (?:now|all|it|message|email|reply|post|tweet|prompt))?",
                           re.IGNORECASE)
-PENDING_SEND = {"request": "", "time": 0.0}
+PENDING_SEND = {"request": "", "time": 0.0, "task": ""}  # task: the journal entry of the task that held it
 SEND_HOLD_SECONDS = 600
 
 
@@ -12333,29 +13867,301 @@ Rules:
 """
 
 
-def execute_smart_action(cmd: str, bridge: Bridge, sw: int, sh: int, wav_bytes: bytes = b"") -> str:
+TASK_ENDED = threading.local()  # .state: how the last command in this thread ended in the journal (see end_task)
+# A planner failure that is the AI's, not the task's: over its limit, busy, slow or out of reach. A task that
+# ends on one is paused ("The AI needed a rest.") rather than stuck.
+AI_BUSY = re.compile(r"quota|\b(?:429|5\d\d)\b|overload|busy|high demand|too long|time[ds]? ?out|could not reach"
+                     r"|can't reach", re.IGNORECASE)
+# What a task picked up after being cut off mid-action asks about first: these can't be taken back.
+CANNOT_UNDO = {"delete_file", "write_file", "copy_file", "move_file", "rename_file", "close_window", "system_control"}
+# What a picked-up task may still do without a question while it is unsure what happened before it stopped: looking
+# around and opening things (their own risky questions still apply). Anything else asks first: a click by x and y
+# may be a Send button with no name.
+SAFE_WHEN_UNSURE = {"scroll", "wait", "move_mouse", "point_at", "focus_window", "maximize_window", "minimize_window",
+                    "open_app", "open_url", "open_path", "search_web"}
+
+
+def journal_call(method, *args, **kwargs):
+    # A call to the task journal that can't break the task it notes: on an error the task goes on, it just
+    # can't be picked up later.
+    try:
+        return method(*args, **kwargs)
+    except Exception:
+        LOG.warning("The task journal failed", exc_info=True)
+        return None
+
+
+def owner_command() -> bool:
+    # A command of the PC's owner: not a guest's from a chat, and not a routine's step.
+    return not getattr(GUEST_COMMAND, "name", None) and not getattr(ROUTINE_RUN, "active", False)
+
+
+def command_source(spoken: bool = False) -> str:
+    # Where the command running in this thread came from, as the task journal keeps it.
+    if getattr(ROUTINE_RUN, "active", False):
+        return "routine"
+    if getattr(TELEGRAM_COMMAND, "active", False):
+        return "telegram"
+    service = getattr(CHAT_COMMAND, "service", None)
+    if service is not None:
+        return str(getattr(service, "kind", "chat"))
+    return "voice" if spoken else "typed"
+
+
+def ai_rest_ends():
+    # When every Gemini model is over its free limit (see models_to_try): the time (time.time()) the first may
+    # be asked again, so a task paused for it isn't picked up before then. None when one is awake, or for
+    # another AI, which says nothing about when.
+    if ai_provider() != "gemini":
+        return None
+    now = time.monotonic()
+    ends = [RESTING_MODELS.get(model, 0) for model in GEMINI_MODELS]
+    if not ends or min(ends) <= now:
+        return None
+    return time.time() + min(ends) - now
+
+
+def end_task(heard: dict) -> str:
+    # Notes in the journal how the command that just ended went: "done" and "dropped" leave it, "paused" and
+    # "stuck" keep it to be picked up. Returns that, or "" for a command with no entry (a quick answer, a
+    # guest's command).
+    task_id = heard.get("task")
+    if not task_id:
+        return ""
+    ending = heard.get("ending") or {"state": "done"}
+    if ending["state"] in ("done", "dropped"):
+        journal_call(TASKS.pause, task_id, ending["state"], "")
+    else:
+        journal_call(TASKS.pause, task_id, ending["state"], ending["why"], retry_at=ending.get("retry_at"))
+        LOG.info("The task is %s (%s): it can be picked up", ending["state"], ending["why"])
+    return ending["state"]
+
+
+def cannot_undo(action: dict, control_lines: list, risky=None) -> bool:
+    # Sends, deletes, closes, file changes, the PC's power, careful buttons ("Delete", "Buy", "Send") and risky
+    # keys (risky: risky_action_reason's question for it).
+    kind = action["type"]
+    if risky or sends_something(action, control_lines) or kind in CANNOT_UNDO:
+        return True
+    if kind == "click_element" and 0 < action["id"] <= len(control_lines):
+        name = control_kind_and_name(control_lines[action["id"] - 1])[1].strip()
+        return bool(CAREFUL_WORDS.search(name.lower()) or SEND_CONTROL.match(name))
+    return False
+
+
+def resume_question(unsure: str, action: dict, control_lines: list, risky=None, sent=(), held=False) -> str:
+    # The question a picked-up task asks before the first thing it can't undo (and, until the user says to go on,
+    # before anything but looking around): its last action was cut off halfway and may have happened already, it
+    # held a send for a yes it never got (held), or it already did something that can't be undone (sent). A risky
+    # action's own question is asked with it, not after it. What it is about to type is shown: this is asked now,
+    # never saved.
+    if unsure:
+        question = f"Before I stopped, I was {unsure}. It may have happened already. "
+    elif held:
+        question = "Earlier I held back the send for your yes. "
+    elif sent:
+        question = f"Before I stopped, I already did this: {sent[-1]}. "
+    else:
+        question = ""
+    if risky:
+        return question + risky
+    verb = final_send_verb(action, control_lines) or ("send" if sends_something(action, control_lines) else "")
+    if verb:
+        return question + f"Should I {verb} it now?"
+    target = ""
+    if action["type"] == "click_element" and 0 < action["id"] <= len(control_lines):
+        target = control_kind_and_name(control_lines[action["id"] - 1])[1]
+    return question + f"Should I go on ({task_journal.action_words(action, target, show_text=True)})?"
+
+
+def send_still_held(entry: dict) -> bool:
+    # The send this task held back still waits for its yes (PENDING_SEND isn't kept over a restart).
+    return (entry.get("why") == "waiting_yes" and PENDING_SEND.get("task") == entry.get("id")
+            and bool(PENDING_SEND["request"]) and time.time() - PENDING_SEND["time"] < SEND_HOLD_SECONDS)
+
+
+def short_reply(bridge, reply: str) -> str:
+    # A reply about picking a task up that ran nothing: the buddy says it, and the history isn't filled with it.
+    LOG.info("Reply: %s", reply)
+    bridge.say_sig.emit(reply, 5000)
+    return reply
+
+
+def resume_task(bridge, sw: int, sh: int, task_id=None, source: str = "") -> str:
+    # Picks up a task that stopped halfway (task_id, or the newest): the phone's Resume task, the PC window, the
+    # tray, or "keep going" said, typed or sent. Nothing is replayed. Motorcycle Man looks at the screen again and
+    # plans the rest, told what is done (see task_journal.resume_context), and asks before the first thing that
+    # can't be undone when its last action was cut off halfway. Always the owner's choice, never automatic.
+    if TASK_LOCK.locked():
+        return short_reply(bridge, "I'm still on it!")
+    entry = TASKS.claim(task_id)  # once: a second tap finds nothing to claim
+    if entry is None:
+        return short_reply(bridge, "There's nothing to pick up right now.")
+    if entry["state"] == "dropped":
+        return short_reply(bridge, f"I've picked this one up {task_journal.MAX_TRIES} times already. "
+                                   "Try saying it a new way.")
+    LOG.info("Picking up %r at step %d (%s)%s", entry["request"], entry["step"], entry["why"],
+             f" from the {source}" if source else "")
+    try:
+        resting = task_journal.resting_minutes(entry)
+        if resting:
+            return short_reply(bridge, f"The AI is still resting. Try again in about {resting} "
+                                       f"minute{'' if resting == 1 else 's'}.")
+        held = send_still_held(entry)  # the button said "Yes, send it": the held send goes, and nothing first
+        if entry.get("routine"):
+            return resume_routine(entry, bridge, sw, sh, yes=held)
+        if held:
+            return execute_smart_action("yes", bridge, sw, sh, picking_up=True)
+        return execute_smart_action(entry["request"], bridge, sw, sh, resume=entry)
+    finally:
+        TASKS.unclaim(entry["id"])  # it never started (a newer command came first): parked as it was
+
+
+FORGET_REFUSED = "It's already starting. Say stop to stop it."  # a forget while that task is being picked up
+
+
+def forget_task(task_id=None) -> str:
+    # Drops a task that stopped halfway (task_id, or the one on offer): the phone's Forget it, the tray, or
+    # "forget it" while nothing runs. A send it held back is dropped with it.
+    entry = TASKS.forget(task_id)
+    if entry is None:
+        starting = TASKS.get(task_id) if task_id else None
+        if starting is not None and starting["state"] in task_journal.LIVE:
+            return FORGET_REFUSED
+        return "There's nothing to pick up right now."
+    LOG.info("Forgot the paused task %r", entry["request"])
+    if send_still_held(entry):
+        PENDING_SEND.update(request="", time=0.0, task="")
+        return "Okay, I won't send it."
+    return "Okay, forgotten."
+
+
+def keep_task_on_quit():
+    # Quit (the tray, or Windows signing out): the running task stops and is kept, paused, to be picked up next
+    # time; keys it held down are let go, and tasks too old to pick up are cleared out of tasks.json.
+    stop_task("quit")
+    holding = TASK_LOCK.acquire(timeout=2)  # its thread notes how far it got, if it ends in time
+    try:
+        journal_call(TASKS.recover, "quit")
+        try:
+            Win32Input.release_held_keys()
+        except Exception:
+            LOG.warning("Couldn't let go of the keys held down", exc_info=True)
+        journal_call(TASKS.expire)
+    finally:
+        if holding:
+            TASK_LOCK.release()
+
+
+def with_resume_hint(reply):
+    # A command from Telegram or a chat that stopped halfway: the reply says how to pick it up from there. Not
+    # while a send is held for a yes: that reply already asks for one.
+    held = PENDING_SEND["request"] and time.time() - PENDING_SEND["time"] < SEND_HOLD_SECONDS
+    if getattr(TASK_ENDED, "state", "") in ("paused", "stuck") and isinstance(reply, str) and reply and not held:
+        return reply + " Say “keep going” to pick it up."
+    return reply
+
+
+def offer_paused_task(bridge):
+    # Once, just after start: a task that an update, Quit, a crash or a power cut cut off is offered by the buddy
+    # (and on Telegram and the chats when nobody is at the PC). Not one the user stopped or replaced: they know.
+    entry = TASKS.offer()
+    if entry is None or entry["offered"] or entry["why"] not in ("update", "quit", "crash", "off"):
+        return
+    words = task_journal.startup_words(entry)
+    LOG.info("Offering the task that was cut off: %r", entry["request"])
+    bridge.notice_sig.emit(words, 12000)
+    telegram_alert(words)
+    chat_alert(words)
+    TASKS.mark_offered(entry["id"])
+
+
+def execute_smart_action(cmd: str, bridge: Bridge, sw: int, sh: int, wav_bytes: bytes = b"", resume=None,
+                         picking_up: bool = False) -> str:
     # A new command stops the task that is running, if any, and runs once that has ended; "stop" only
-    # stops it. Of several commands waiting for a task to end, only the newest runs.
+    # stops it. Of several commands waiting for a task to end, only the newest runs. resume: a task journal
+    # entry claimed by resume_task, planned again from a fresh look at the screen. picking_up: the "yes" of a
+    # "Yes, send it" tap, which (like a resume) never stops another command.
     said, answer = str(cmd or "").strip(), None
-    if said:
+    TASK_ENDED.state = ""
+    if said and resume is None:
         # Reminders and routines are set (or listed, or cancelled) at once, without stopping a task that is
         # running; a routine's name runs its commands, each as its own command.
         answer = reminder_reply(said)
         if answer is None:
             answer = paint_reply(said, bridge)
-        if answer is None and not getattr(ROUTINE_RUN, "active", False):
+        # A guest makes, changes and runs no routines: a saved one would later run as the owner's.
+        if answer is None and owner_command():
             found = routine_reply(said)
             if found and found[0] == "run":
                 return run_routine(found[1], bridge, sw, sh)
             answer = found[1] if found else None
+        if answer is None and owner_command():
+            if is_resume_request(said):
+                LOG.info("Command: %r", said)
+                return resume_task(bridge, sw, sh, source=command_source())
+            if is_forget_request(said) and not TASK_LOCK.locked() and TASKS.offer() is not None:
+                answer = forget_task()  # while a task runs, "never mind" stops it instead
     if answer is not None:
         LOG.info("Command: %r", said)
         LOG.info("Reply: %s", answer)
         add_to_history(said, answer)
         bridge.say_sig.emit(answer, 6000)
         return answer
-    turn = new_turn()
-    heard = {"command": str(cmd or "").strip(), "stopped_one": TASK_LOCK.locked()}
+    if not said and resume is None and len(wav_bytes or b"") <= 1500 and TASK_LOCK.locked():
+        # An empty push-to-talk (a stray tap, or nobody talked) used to stop the task that was running.
+        LOG.info("Nothing was said; the running task goes on")
+        return "I didn't catch that. Tap the helmet and speak again, or tap Type."
+    heard = {}
+    if not said and resume is None and TASK_LOCK.locked():
+        # Words said while a task runs (the PC's microphone, or the phone's hold) are written down first, outside
+        # the task's lock and beside it (see write_down_beside_task), and then handled like typed words: "keep
+        # going" or a reminder leaves the running task alone, and "stop" or a new command still stops it. As when
+        # no task runs, no AI key is needed (sharp ears or Windows write them down). Each recording is written
+        # down once: Gemini can listen to one nothing could write, and the turn then doesn't try again.
+        try:
+            words = write_down_beside_task(wav_bytes)
+        except RuntimeError as exc:
+            if ai_provider() != "gemini" or not ai_ready() or not hearing_may_use_ai():
+                LOG.warning("Couldn't write down the recording: %s", exc)
+                return "I couldn't make out what you said. Try again, or type it."
+            LOG.warning("Couldn't write down the recording (Gemini will listen to it instead): %s", exc)
+            heard["unwritten"] = True
+        else:
+            LOG.info("Heard: %r", words)
+            if not words:
+                return "I didn't catch that. Tap the helmet and speak again, or tap Type."
+            return execute_smart_action(words, bridge, sw, sh)
+    result = _run_turn(cmd, bridge, sw, sh, wav_bytes, heard, resume, picking_up)
+    if heard.get("then") == "resume":
+        # "Keep going" said into the PC's microphone, known once it was written down: the task is picked up
+        # now that this turn has ended.
+        return resume_task(bridge, sw, sh, source="voice")
+    return result
+
+
+def write_down_beside_task(wav_bytes: bytes) -> str:
+    # The words in a recording said while a task runs (see execute_smart_action), written down on a thread that
+    # isn't part of that task: a Stop for it, or a newer command, doesn't cut the writing down short.
+    BESIDE_TASK.on = True
+    try:
+        return transcribe_speech(wav_bytes, ai_key()).strip()
+    finally:
+        BESIDE_TASK.on = False
+
+
+def _run_turn(cmd: str, bridge: Bridge, sw: int, sh: int, wav_bytes: bytes, heard: dict, resume=None,
+              picking_up: bool = False) -> str:
+    # One command's turn (see execute_smart_action). heard gathers what it learns on the way: the words, the
+    # journal entry of its task (heard["task"]) and how that ended (heard["ending"]).
+    if (resume is not None or picking_up) and TASK_LOCK.locked():
+        # Another command started between the Resume tap and now: a pick-up never stops it (resume_task puts the
+        # task back as it was), and a routine being picked up doesn't go on to its next step.
+        TASK_ENDED.state = "not_started"
+        return short_reply(bridge, "I'm still on it!")
+    stopping = LIVE_TASK["id"]  # the journal entry of the task this command stops, if any
+    turn = new_turn("stop" if is_stop_request(cmd) else "newer")
+    heard.update(command=str(cmd or "").strip(), stopped_one=TASK_LOCK.locked(), stopped_task=stopping)
     if heard["stopped_one"] and is_stop_request(cmd):
         LOG.info("Command: %r", heard["command"])
         ended = TASK_LOCK.acquire(timeout=STOP_WAIT_SECONDS)
@@ -12378,21 +14184,30 @@ def execute_smart_action(cmd: str, bridge: Bridge, sw: int, sh: int, wav_bytes: 
             TASK_LOCK.release()
             return "Skipped for your newer command."
         TASK_STOP.clear()
+        STOP_WHY["why"] = ""
         TASK_TURNS["running"] = turn
     try:
+        with TASK_STATUS_LOCK:
+            TASK_STATUS["say"] = ""  # the last task's words (show_activity), which nothing else clears
         publish_task_status(bridge, "Status: Starting command...", running=True)
         wake_screen()
-        LOG.info("Command: %r%s", heard["command"], " (voice recording)" if wav_bytes else "")
+        LOG.info("Command: %r%s", heard["command"], " (voice recording)" if wav_bytes else
+                 " (picked up again)" if resume is not None else "")
         stopped = False
         try:
-            result = _execute_smart_action_locked(cmd, bridge, sw, sh, wav_bytes, heard)
+            result = _execute_smart_action_locked(cmd, bridge, sw, sh, wav_bytes, heard, resume=resume)
         except TaskStopped:
             stopped = True
             result = "Okay, I stopped." if TASK_TURNS["latest"] == turn else "Stopped for your new command."
+            heard["ending"] = {"state": "paused",
+                               "why": STOP_WHY["why"] or ("stop" if TASK_TURNS["latest"] == turn else "newer")}
         except Exception as exc:
             LOG.exception("Command failed")
             result = "Error: " + str(exc)[:280]
+            heard["ending"] = {"state": "stuck", "why": "error"}
         LOG.info("Reply: %s", result)
+        if heard.get("then"):
+            return result  # nothing was done yet: what was said is done next (see execute_smart_action)
         remember(heard["command"], heard.get("memory") or result)
         add_to_history(heard["command"], result, heard.get("card"))
         if stopped:
@@ -12407,8 +14222,11 @@ def execute_smart_action(cmd: str, bridge: Bridge, sw: int, sh: int, wav_bytes: 
             bridge.act_sig.emit("done" if mood == "happy" else "oops", {})  # confetti, or a shake
         return result
     finally:
+        TASK_ENDED.state = end_task(heard)
         with TASK_TURNS_LOCK:
             TASK_TURNS["running"] = 0
+        LIVE_TASK["id"] = ""
+        wake_screen(False)
         publish_task_status(bridge, "Status: Ready!", running=False)
         TASK_LOCK.release()
 
@@ -12458,18 +14276,26 @@ def ai_name() -> str:
     return (ai_model(provider) or "the AI") if provider == "compatible" else ai_providers.PROVIDERS[provider]["short"]
 
 
-def _execute_smart_action_locked(cmd: str, bridge: Bridge, sw: int, sh: int, wav_bytes: bytes = b"", heard=None) -> str:
+def _execute_smart_action_locked(cmd: str, bridge: Bridge, sw: int, sh: int, wav_bytes: bytes = b"", heard=None,
+                                 resume=None) -> str:
     raw = str(cmd or "").strip()
     heard = heard if heard is not None else {}
+    if resume is not None:
+        # A task picked up again (see resume_task): its words were written down and checked the first time.
+        raw, wav_bytes = str(resume.get("request") or raw).strip(), b""
+    source = command_source(spoken=bool(wav_bytes))
     has_audio = bool(wav_bytes) and len(wav_bytes) > 1500
-    if not raw and has_audio and ai_ready():
+    if not raw and has_audio and not heard.get("unwritten"):  # (unwritten: tried already, see execute_smart_action)
         # Words said into the PC's microphone are written down first, so they are handled like
-        # typed ones: a scroll or "go back" happens at once, and a spoken "yes" confirms a send.
+        # typed ones: a scroll or "go back" happens at once, and a spoken "yes" confirms a send. With no AI key
+        # too: sharp ears or Windows write them down, and the commands that need no AI still work.
         publish_task_status(bridge, "Status: Writing down what you said...", running=True)
         try:
             raw = transcribe_speech(wav_bytes, ai_key())
         except RuntimeError as exc:
-            if ai_provider() != "gemini":  # only Gemini can be handed the recording itself
+            if ai_provider() != "gemini" or not ai_ready() or not hearing_may_use_ai():
+                # Only Gemini, with a key, can be handed the recording, and with sharp ears set up only when the
+                # user said so (see hearing_may_use_ai).
                 LOG.warning("Couldn't write down the recording: %s", exc)
                 return "I couldn't make out what you said. Try again, or type it."
             LOG.warning("Couldn't write down the recording (Gemini will listen to it instead): %s", exc)
@@ -12478,31 +14304,56 @@ def _execute_smart_action_locked(cmd: str, bridge: Bridge, sw: int, sh: int, wav
             if not raw:
                 return "I didn't catch that. Tap the helmet and speak again, or tap Type."
             heard["command"], wav_bytes, has_audio = raw, b"", False
+            if is_resume_request(raw) and owner_command():
+                heard["then"] = "resume"  # picked up once this turn has ended (see execute_smart_action)
+                return ""
 
     # When Motorcycle Man has held back a final send/post/run step, "yes" finishes that request and
     # "no" (or any other command) drops it. A try where nothing was heard leaves it waiting.
-    pending = PENDING_SEND["request"] if time.time() - PENDING_SEND["time"] < SEND_HOLD_SECONDS else ""
-    if raw or has_audio:
-        PENDING_SEND.update(request="", time=0.0)
+    # A guest's message never finishes or drops it: only the owner says yes to a send.
+    guest = getattr(GUEST_COMMAND, "name", None)
+    pending = PENDING_SEND["request"] if time.time() - PENDING_SEND["time"] < SEND_HOLD_SECONDS and not guest else ""
+    held_task = PENDING_SEND.get("task", "") if pending else ""  # the journal entry of the task that held it
+    if (raw or has_audio) and not guest:
+        PENDING_SEND.update(request="", time=0.0, task="")
+    dropped_held = None
+    if held_task and raw and held_task != (resume or {}).get("id") and not (resume is None and is_affirmation(raw)):
+        # Anything but a yes drops the held send, and the task that held it with it: it isn't offered later.
+        dropped_held = journal_call(TASKS.forget, held_task)
     confirmed = False
     task = raw
-    if pending and raw:
+    if pending and raw and resume is None:
         if is_refusal(raw):
             return "Okay, I won't send it."
-    if is_stop_request(raw):
-        return "Okay, I stopped." if heard.get("stopped_one") else "Okay. Nothing's running right now."
-    if pending and raw:
+    forget = resume is None and owner_command() and is_forget_request(raw)
+    if (resume is None and is_stop_request(raw)) or forget:
+        if heard.get("stopped_one"):
+            if heard.get("stopped_task"):
+                # Said into the PC's microphone, "stop" looked like a newer command until it was written down.
+                journal_call(TASKS.relabel, heard["stopped_task"], "stop")
+            return "Okay, I stopped."
+        if forget and dropped_held is not None:
+            return "Okay, I won't send it."  # the held send was what to forget, not an older task
+        if forget and (TASKS.offer() is not None or not is_stop_request(raw)):
+            return forget_task()
+        return "Okay. Nothing's running right now."
+    if pending and raw and resume is None:
         if is_affirmation(raw):
             confirmed = True
             task = (f'The user said "{raw}" to confirm. Finish their earlier request now, including the final '
                     f'send/post/run step you held back: "{pending}"')
 
-    def hold_for_yes(message):
-        PENDING_SEND.update(request=pending if confirmed else raw, time=time.time())
-        LOG.info("Waiting for a yes before finishing: %r", PENDING_SEND["request"])
+    def halt(why, message, state="paused", retry_at=None):
+        # How this task stopped short, for the journal (see end_task); the reply itself is unchanged.
+        heard["ending"] = {"state": state, "why": why, "retry_at": retry_at}
         return message
 
-    if raw and not confirmed:
+    def hold_for_yes(message):
+        PENDING_SEND.update(request=pending if confirmed else raw, time=time.time(), task=heard.get("task") or "")
+        LOG.info("Waiting for a yes before finishing: %r", PENDING_SEND["request"])
+        return halt("waiting_yes", message)
+
+    if raw and not confirmed and resume is None:
         if re.fullmatch(r"(?:please )?(?:close|hide|dismiss)(?: the)? (?:research(?: card)?|card)",
                         " ".join(raw.lower().split()).strip(" .!")):
             bridge.research_hide_sig.emit()
@@ -12522,7 +14373,7 @@ def _execute_smart_action_locked(cmd: str, bridge: Bridge, sw: int, sh: int, wav
         battery = phone_battery_reply(raw)
         if battery is not None:
             return battery
-        guard = guard_reply(raw)
+        guard = guard_reply(raw) if not guest else None  # a guest's words never arm or disarm the Guard,
         if guard is not None:
             return guard
         focus = focus_reply(raw, bridge)
@@ -12534,22 +14385,22 @@ def _execute_smart_action_locked(cmd: str, bridge: Bridge, sw: int, sh: int, wav
         listed = lists_reply(raw)
         if listed is not None:
             return listed
-        used = screen_time_reply(raw)
+        used = screen_time_reply(raw) if not guest else None  # show screen time, change settings,
         if used is not None:
             return used
-        setting = settings_reply(raw)
+        setting = settings_reply(raw) if not guest else None  # report on the PC, search its files
         if setting is not None:
             return setting
         ring = ring_reply(raw)  # before Find, which would look for files called "phone"
         if ring is not None:
             return ring
-        health = health_reply(raw)
+        health = health_reply(raw) if not guest else None
         if health is not None:
             return health
-        found = find_reply(raw)
+        found = find_reply(raw) if not guest else None
         if found is not None:
             return found
-        brief = brief_reply(raw)
+        brief = brief_reply(raw) if not guest else None  # or read out the brief
         if brief is not None:
             return brief
         reminder = reminder_reply(raw)  # said into the PC's microphone, so only written down just now
@@ -12571,10 +14422,22 @@ def _execute_smart_action_locked(cmd: str, bridge: Bridge, sw: int, sh: int, wav
         return ("Add your AI key in the Motorcycle Man window first (Gemini is free; Claude, ChatGPT and others work "
                 "too). Until then Motorcycle Man can only open apps.")
 
-    question = research_request(raw) if raw and not confirmed else None
+    question = research_request(raw) if raw and not confirmed and resume is None else None
     if question:
         # A plain research request needs no look at the screen.
         return run_research(question, bridge, key, heard)
+
+    def begin(request):
+        # This task's journal entry, so it can be picked up if it is cut off. A resume, or a yes to a held send,
+        # carries on with the entry it had. A guest's task isn't kept: only the owner picks tasks up.
+        if heard.get("task") or getattr(GUEST_COMMAND, "name", None):
+            return
+        carry_on = resume["id"] if resume is not None else held_task if confirmed else None
+        heard["task"] = LIVE_TASK["id"] = journal_call(
+            TASKS.start, request, source, getattr(ROUTINE_RUN, "where", None), carry_on) or ""
+
+    if raw:
+        begin(pending if confirmed else raw)
 
     known_folders = get_known_folder_paths()
     app_names = sorted(installed_apps())[:200]
@@ -12591,6 +14454,28 @@ def _execute_smart_action_locked(cmd: str, bridge: Bridge, sw: int, sh: int, wav
     # the clipboard before).
     last_done, done_repeats, rechecking, todo = None, 0, False, ""
     clip_seq, copied_text = clipboard_sequence(), ""
+    # A task picked up again knows what it did, what was left and its last steps, and counts its steps on from
+    # where it stopped; its limits start afresh. unsure: an action cut off halfway, which may have happened.
+    # sent: what it did that can't be undone (a send, a delete...), so a resume never does it again unasked.
+    step_offset, done_at_start, unsure, sent = 0, 0, "", []
+    if resume is not None:
+        resumed = task_journal.resume_context(resume)
+        history, completed, todo = resumed["history"], resumed["completed"], resumed["todo"]
+        step_offset, done_at_start, unsure = resumed["step_offset"], resumed["done_at_start"], resumed["unsure"]
+        sent = list(resumed["sent"])
+        task = f"{raw}\n{resumed['note']}"
+        if resumed["copied"] and clipboard_text()[:300] == resumed["copied"][:300]:
+            copied_text = resumed["copied"]  # still on the clipboard
+    # A picked-up task asks before anything that can't be undone, and until the user says to go on, before anything
+    # but looking around (see SAFE_WHEN_UNSURE): when its last action was cut off halfway, when it had held a send
+    # for a yes it never got, or when it had already done something that can't be undone.
+    held_send = resume is not None and resume.get("why") == "waiting_yes"
+    guarded, went_on = bool(unsure) or bool(sent) or held_send, False
+    # What this task typed, wrote or searched for, kept out of its note of what is left on disk (see
+    # task_journal.scrub); and whether it typed or pasted something that an unnamed click may have sent.
+    said_texts = []
+    last_did = str(completed[-1]) if completed else ""
+    typed = last_did.startswith(("typing ", "pressing Ctrl+V", "pressing Shift+Insert")) and not last_did.endswith("Enter")
 
     bridge.screen_hide_sig.emit()
     window_to_work_on()  # not BlueStacks, where the command may have been typed
@@ -12604,8 +14489,9 @@ def _execute_smart_action_locked(cmd: str, bridge: Bridge, sw: int, sh: int, wav
     try:
         for step in range(1, MAX_PLANNING_STEPS + 1):
             stop_point()
-            if time.monotonic() - started > MAX_TASK_SECONDS or len(completed) >= MAX_TASK_ACTIONS:
+            if time.monotonic() - started > MAX_TASK_SECONDS or len(completed) - done_at_start >= MAX_TASK_ACTIONS:
                 break
+            step_no = step_offset + step  # the step's number over every go at this task
 
             img_b64, screen_w, screen_h, img_w, img_h = capture_screen_for_planner()
             if acted and img_b64 == last_screen:
@@ -12613,10 +14499,10 @@ def _execute_smart_action_locked(cmd: str, bridge: Bridge, sw: int, sh: int, wav
                 # all minute (scrolling up at the top of a list once went 16 rounds).
                 unchanged += 1
                 if unchanged >= MAX_UNCHANGED_STEPS:
-                    return (f"Stopped: the screen didn't change after {unchanged} tries. "
-                            + ("Done so far: " + ", ".join(completed[-3:]) + "." if completed else ""))
-                history.append({"step": step, "result": "NOTE: the screen looks exactly as it did before your last "
-                                                        "actions; they changed nothing. Try something different."})
+                    return halt("unchanged", f"Stopped: the screen didn't change after {unchanged} tries. "
+                                + ("Done so far: " + ", ".join(completed[-3:]) + "." if completed else ""), "stuck")
+                history.append({"step": step_no, "result": "NOTE: the screen looks exactly as it did before your last "
+                                                         "actions; they changed nothing. Try something different."})
             elif acted:
                 unchanged = 0
             last_screen, acted = img_b64, False
@@ -12624,7 +14510,7 @@ def _execute_smart_action_locked(cmd: str, bridge: Bridge, sw: int, sh: int, wav
             open_wins = list_open_windows()
             active = _user32_windows.GetForegroundWindow()
             control_lines, control_centers = read_window_controls(active, screen_w, screen_h, img_w, img_h)
-            LOG.info("Step %d: active window %r, %d controls", step, window_title(active), len(control_lines))
+            LOG.info("Step %d: active window %r, %d controls", step_no, window_title(active), len(control_lines))
 
             context_text = (
                 PLANNER_SYSTEM_INSTRUCTIONS
@@ -12657,7 +14543,7 @@ def _execute_smart_action_locked(cmd: str, bridge: Bridge, sw: int, sh: int, wav
                 parts.append({"text": context_text + f"\nUser command: {task}"
                               + ("\nThe user has said yes: do the final send/post/run step now." if confirmed else "")})
 
-            publish_task_status(bridge, f"Status: Step {step} — analyzing screen with {ai_name()}...", running=True)
+            publish_task_status(bridge, f"Status: Step {step_no} — analyzing screen with {ai_name()}...", running=True)
             try:
                 plan = call_gemini_planner(parts, key)
             except RuntimeError as exc:
@@ -12665,7 +14551,10 @@ def _execute_smart_action_locked(cmd: str, bridge: Bridge, sw: int, sh: int, wav
                 failed_steps += 1
                 last_problem = str(exc)
                 if failed_steps >= MAX_FAILED_STEPS:
-                    return f"Stopped after {MAX_FAILED_STEPS} failed tries in a row. Last problem: {last_problem}"
+                    message = f"Stopped after {MAX_FAILED_STEPS} failed tries in a row. Last problem: {last_problem}"
+                    if AI_BUSY.search(last_problem):
+                        return halt("ai_busy", message, "paused", ai_rest_ends())
+                    return halt("failed", message, "stuck")
                 publish_task_status(bridge, f"Status: {ai_name()} is busy, trying again...", running=True)
                 task_sleep(3)
                 continue
@@ -12674,7 +14563,7 @@ def _execute_smart_action_locked(cmd: str, bridge: Bridge, sw: int, sh: int, wav
             except ValueError as exc:
                 # Nothing from a rejected plan has run. Gemini gets one chance to correct it.
                 LOG.warning("Plan rejected: %s", exc)
-                publish_task_status(bridge, f"Status: Step {step} — asking {ai_name()} to fix its plan...", running=True)
+                publish_task_status(bridge, f"Status: Step {step_no} — asking {ai_name()} to fix its plan...", running=True)
                 hint = ""
                 if "number of a control" in str(exc):
                     hint = (f" The controls list has numbers 1 to {len(control_centers)}. If what you want to click isn't in it, "
@@ -12688,15 +14577,22 @@ def _execute_smart_action_locked(cmd: str, bridge: Bridge, sw: int, sh: int, wav
                     LOG.warning("Corrected plan failed too: %s", exc)
                     actions, plan = None, {}
                     last_problem = f"{ai_name()}'s plan was rejected: {exc}"
-                    history.append({"step": step, "result": "FAILED: " + last_problem})
+                    history.append({"step": step_no, "result": "FAILED: " + last_problem})
             if not raw and isinstance(plan.get("transcript"), str) and plan["transcript"].strip():
                 raw = task = heard["command"] = plan["transcript"].strip()[:500]
+                begin(raw)  # only now are the words known
             message = str(plan.get("message") or plan.get("thought") or "Completed.")
             awaiting_yes = plan.get("awaiting_yes") is True and not confirmed
 
             if actions == []:
                 return hold_for_yes(message) if awaiting_yes else message
             todo = " ".join(str(plan.get("todo") or "").split())[:200]
+            said_texts = (said_texts + [a[name] for a in actions or [] for name in task_journal.SECRET_FIELDS
+                                        if isinstance(a.get(name), str)])[-60:]
+            if heard.get("task"):
+                # Before anything runs; without what was copied or is being typed (tasks.json is kept on disk).
+                journal_call(TASKS.checkpoint, heard["task"], step=step_no,
+                             todo=task_journal.scrub(todo, said_texts + [copied_text], pending if confirmed else raw))
             signature = action_signatures(actions or [], control_lines, img_w, img_h)
             repeated = plan.get("done") is True and bool(last_done) and same_actions(signature, last_done)
             if repeated and done_repeats >= 1:
@@ -12714,6 +14610,9 @@ def _execute_smart_action_locked(cmd: str, bridge: Bridge, sw: int, sh: int, wav
                 verb = None if confirmed else final_send_verb(act, control_lines)
                 if verb:
                     # Everything is typed and only the send/post/run is left: wait for the user's yes.
+                    if guarded and (unsure or sent):
+                        return hold_for_yes("I may have sent it already before I stopped. Have a look, and say yes "
+                                            "if I should send it.")
                     return hold_for_yes(f"Ready. Say yes to {verb} it.")
                 if act_type == "research":
                     # Research ends the task: the card holds the answer and its takeaway is the reply.
@@ -12726,13 +14625,32 @@ def _execute_smart_action_locked(cmd: str, bridge: Bridge, sw: int, sh: int, wav
                         wait_for_buddy()  # let the buddy run there before acting
                 else:
                     set_mood(bridge, ACTION_MOODS.get(act_type, "thinking"))
+                target = (control_kind_and_name(control_lines[act["id"] - 1])[1]
+                          if act_type == "click_element" and 0 < act["id"] <= len(control_lines) else "")
                 question = risky_action_reason(act)
+                irreversible = cannot_undo(act, control_lines, question)
+                asking_first = guarded and (irreversible or (act_type not in SAFE_WHEN_UNSURE and not went_on))
+                if asking_first:
+                    # Picked up unsure of what happened before it stopped: a question first.
+                    question = resume_question(unsure, act, control_lines, question, sent=sent, held=held_send)
                 if question:
                     answer = ask_user_to_confirm(bridge, question)
                     if not answer:
+                        if asking_first and answer is False:
+                            return halt("", "Okay, I won't send it." if sends_something(act, control_lines)
+                                        else "Okay, I won't.", "dropped")
                         why = "you didn't allow" if answer is False else "no answer in time for"
                         done_so_far = (" Done before that: " + ", ".join(completed[-3:]) + ".") if completed else ""
-                        return f"Stopped: {why} \"{question}\"{done_so_far}"
+                        return halt("" if answer is False else "no_answer", f"Stopped: {why} \"{question}\"{done_so_far}",
+                                    "dropped" if answer is False else "paused")
+                    if asking_first and irreversible:
+                        guarded = False
+                        journal_call(TASKS.checkpoint, heard.get("task"), unsure="")
+                    elif asking_first:
+                        went_on = True  # the next thing that can't be undone still asks
+                if heard.get("task"):
+                    # Written before it runs: if this is cut off halfway, a resume knows it may have happened.
+                    journal_call(TASKS.mark_in_flight, heard["task"], act, step=step_no, target=target)
                 publish_task_status(bridge, f"Status: Running {act_type}...", running=True)
                 if BUDDY_HIDDEN_FROM_SCREENSHOTS:
                     act_out(bridge, act, screen_w, screen_h, img_w, img_h, point)
@@ -12755,6 +14673,25 @@ def _execute_smart_action_locked(cmd: str, bridge: Bridge, sw: int, sh: int, wav
                 LOG.info("Ran %s -> %s", json.dumps(act, ensure_ascii=False), res_summary)
                 completed.append(res_summary)
                 history.append({"action": act, "result": res_summary})
+                # A click with no name right after typing may have been the Send button: it is kept with what
+                # can't be undone, so a resume asks before sending again.
+                maybe_sent = typed and not irreversible and not step_failed and (
+                    act_type in ("click", "double_click") or (act_type == "click_element" and not target.strip()))
+                if not step_failed:
+                    if irreversible or maybe_sent:
+                        typed = False  # what was typed went, or may have
+                    elif act_type == "type_text" or is_paste(act):
+                        typed = True
+                if heard.get("task"):
+                    # In plain words, without what was typed (tasks.json is kept on disk); what can't be undone is
+                    # also kept apart, so a resume never does it again unasked.
+                    done_words = task_journal.action_words(act, target) + (" (it didn't work)" if step_failed else "")
+                    if irreversible and not step_failed:
+                        sent.append(done_words)
+                    elif maybe_sent:
+                        sent.append(done_words + " right after typing (it may have sent it)")
+                    journal_call(TASKS.mark_done_action, heard["task"], done_words,
+                                 sent=sent if (irreversible and not step_failed) or maybe_sent else None)
                 if step_failed:
                     break  # look at the screen again before trying anything else
                 acted = acted or act_type not in ("wait", "point_at")
@@ -12775,9 +14712,12 @@ def _execute_smart_action_locked(cmd: str, bridge: Bridge, sw: int, sh: int, wav
                         shown = " ".join(copied_text.split())
                         history[-1]["result"] += f' (copied {len(copied_text)} characters: "{shown[:80]}")'
                         LOG.info("Copied %d characters", len(copied_text))
+            if heard.get("task"):
+                journal_call(TASKS.checkpoint, heard["task"], history=history, copied=copied_text)
             failed_steps = failed_steps + 1 if step_failed else 0
             if failed_steps >= MAX_FAILED_STEPS:
-                return f"Stopped after {MAX_FAILED_STEPS} failed tries in a row. Last problem: {last_problem}"
+                return halt("failed", f"Stopped after {MAX_FAILED_STEPS} failed tries in a row. Last problem: {last_problem}",
+                            "stuck")
             if awaiting_yes and not step_failed:
                 return hold_for_yes(message)
             if actions and not step_failed and all(a["type"] == "point_at" for a in actions):
@@ -12794,8 +14734,8 @@ def _execute_smart_action_locked(cmd: str, bridge: Bridge, sw: int, sh: int, wav
             last_done = signature if plan.get("done") is True and not step_failed else None
             rechecking = last_done is not None
 
-        return "Stopped at Motorcycle Man's time or step limit. " + (
-            "Done so far: " + ", ".join(completed[-4:]) + "." if completed else "Nothing was done.")
+        return halt("limit", "Stopped at Motorcycle Man's time or step limit. " + (
+            "Done so far: " + ", ".join(completed[-4:]) + "." if completed else "Nothing was done."))
     finally:
         Win32Input.release_held_keys()
         bridge.screen_show_sig.emit()
@@ -12829,10 +14769,6 @@ def tell_running_app(message: bytes) -> bool:
     socket.waitForBytesWritten(1000)
     socket.disconnectFromServer()
     return True
-
-
-def show_running_app() -> bool:
-    return tell_running_app(b"show")
 
 
 _kernel32_claim = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -12978,11 +14914,27 @@ HOTKEY_ID, WM_HOTKEY, VK_M = 0x4D4D, 0x0312, 0x4D
 MOD_ALT, MOD_CONTROL, MOD_NOREPEAT = 0x1, 0x2, 0x4000
 
 
+PC_LISTEN_TAKE = {"session": 0}  # the recording of the PC's own listening, which asking again ends (not a press's)
+
+
+def phone_press_on_pc_mic() -> bool:
+    # Whether a press on the phone's helmet is recording on the PC's microphone now (held, or a tap waiting for the
+    # quiet).
+    with PHONE_TALK_LOCK:
+        session = PHONE_TALK["session"]
+    return bool(session) and MIC_RECORDER.in_use(session) is True
+
+
 def listen_and_run(bridge, sw: int, sh: int):
     # Listens on the PC's microphone until the talking stops, then does what was said. Asked again while
-    # it listens (the shortcut pressed twice): done talking.
+    # it listens (the shortcut pressed twice): done talking. While a press on the phone's helmet records on the PC's
+    # microphone, the wake words and Ctrl+Alt+M are let be, so they never cut that press short. A press that takes
+    # the microphone meanwhile wins: this listening then ends without a word, and the phone shows its own.
+    if phone_press_on_pc_mic():
+        LOG.info("The wake words or Ctrl+Alt+M came while a phone press uses the PC's microphone; left alone")
+        return
     if not PC_LISTENING.acquire(blocking=False):
-        MIC_RECORDER.stop_listening()
+        MIC_RECORDER.stop_listening(PC_LISTEN_TAKE["session"])
         return
     try:
         PC_VOICE.hush()
@@ -12991,23 +14943,237 @@ def listen_and_run(bridge, sw: int, sh: int):
         bridge.say_sig.emit("I'm listening…", 0)
         publish_task_status(bridge, "Status: Listening to your voice...", running=True)
         time.sleep(0.2)  # after the chirp, so it isn't taken for the start of the talking
-        MIC_RECORDER.start()
-        wav_bytes = MIC_RECORDER.stop(until_quiet=True)
+        session = PC_LISTEN_TAKE["session"] = MIC_RECORDER.start(MicRecorder.TAP_SECONDS)
+        wav_bytes = MIC_RECORDER.stop(session=session, until_quiet=True)
+        if not wav_bytes and MIC_RECORDER.replaced(session):
+            set_mood(bridge, "idle")
+            return
         if not wav_bytes or not MIC_RECORDER.heard_speech:
             publish_task_status(bridge, "Status: Ready!", running=False)
             set_mood(bridge, "idle")
-            bridge.say_sig.emit(MIC_RECORDER.error or "I didn't hear anything.", 3000)
+            bridge.say_sig.emit(MIC_RECORDER.error or (PC_MIC_MUTED if MIC_RECORDER.silent else "I didn't hear anything."),
+                                3000)
             return
-        reply = execute_smart_action("", bridge, sw, sh, wav_bytes=wav_bytes)
+        reply = execute_smart_action("", bridge, sw, sh, wav_bytes=tidy_recording(wav_bytes, MIC_RECORDER.levels))
         if load_settings().get("voice_replies", True):
             PC_VOICE.say(reply)
     finally:
         PC_LISTENING.release()
 
 
+# A press on the phone's helmet, as the PC hears about it: /hold_start when the finger goes down, /listen_stop for a
+# second tap, /hold_stop when it ends, each with the page's talk key (s), which pairs them (they arrive on
+# different connections, in any order).
+def talk_key(query: dict) -> str:
+    # The press's talk key in a phone request, or "" when it is missing or isn't one.
+    key = query.get("s", [""])[0]
+    return key if TALK_KEY.fullmatch(key) else ""
+
+
+def legacy_talk_key(path: str) -> str:
+    # A page loaded before talk keys (until it reloads) sends none. Its /hold_start gets a key made here
+    # ("legacy-1"...), its /hold_stop pairs with its newest press that hasn't ended (or gets a key of its own when
+    # the phone heard the words itself), and its /listen_stop stops the press that is recording, as before.
+    with PHONE_TALK_LOCK:
+        if path == "/listen_stop":
+            return PHONE_TALK["key"]
+        if path == "/hold_stop":
+            for key, _ in reversed(PHONE_TALK["started"]):
+                if key.startswith("legacy-") and key not in PHONE_TALK["ended"]:
+                    return key
+        LEGACY_TALKS["made"] += 1
+        return f"legacy-{LEGACY_TALKS['made']}"
+
+
+TALK_STATS = {"e": str, "r": int, "ready": int, "ms": int, "how": str}
+
+
+def talk_stats(raw: str) -> str:
+    # The page's numbers about a press, for the log ({"e":"app","r":2,"ready":410,"ms":8200,"how":"seg"}): only
+    # those fields, numbers and short names (anything else is left out, so never words), on one line of at most 300
+    # characters.
+    try:
+        given = json.loads(raw)
+    except ValueError:
+        given = None
+    if not isinstance(given, dict):
+        return "(unreadable)"
+    kept = {}
+    for name, kind in TALK_STATS.items():
+        value = given.get(name)
+        if kind is int and isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+            kept[name] = max(-1, min(int(value), 10 ** 7))
+        elif kind is str and isinstance(value, str) and re.fullmatch(r"[a-z0-9]{1,8}", value):
+            kept[name] = value
+    return json.dumps(kept, separators=(",", ":"))[:300]
+
+
+def phone_talk_over(bridge, before: str):
+    # A press that ran nothing has ended: the status is again what it was (a running task's), or Ready.
+    if TASK_LOCK.locked() and before and before != "Status: Listening to your voice...":
+        publish_task_status(bridge, before, running=True)
+    else:
+        publish_task_status(bridge, "Status: Ready!", running=False)
+
+
+def talk_timer(seconds: float, work, *args) -> threading.Timer:
+    timer = threading.Timer(seconds, work, args=args)
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
+def warn_long_talk(bridge, key: str):
+    # 110 s into a hold on the PC's microphone: the status says so, as the phone does (the recording stops at
+    # 120 s). 40 s later, a press whose page never said it ended (its connection lost) is let go.
+    with PHONE_TALK_LOCK:
+        if PHONE_TALK["key"] != key or key in PHONE_TALK["ended"] or MIC_RECORDER.replaced(PHONE_TALK["session"]):
+            return
+        publish_task_status(bridge, "Status: Still listening: 10 seconds left.", running=True)
+        PHONE_TALK["timer"] = talk_timer(TALK_GIVE_UP_SECONDS, give_up_talk, bridge, key)
+
+
+def give_up_talk(bridge, key: str):
+    with PHONE_TALK_LOCK:
+        if PHONE_TALK["key"] != key or key in PHONE_TALK["ended"]:
+            return
+        PHONE_TALK["ended"].append(key)
+        session, listening, before = PHONE_TALK["session"], PHONE_TALK["listening"], PHONE_TALK["before"]
+        PHONE_TALK.update(listening=False, timer=None)
+    LOG.info("A press on the phone never ended; what the PC's microphone heard for it was thrown away")
+    if not MIC_RECORDER.stop(session) and MIC_RECORDER.replaced(session):
+        return  # the wake words took the microphone, and show their own state
+    if listening:
+        phone_talk_over(bridge, before)
+
+
+def hold_start_request(bridge, key: str, phone_mic: bool) -> dict:
+    # /hold_start: a press began. Motorcycle Man stops talking, so it doesn't hear itself. With the phone listening
+    # itself (mic=phone) that is all; otherwise the PC's microphone records for this press, and the answer says
+    # within a second whether sound is arriving ("ready": the page says "I'm listening" only then) or why it can't
+    # ("error", in plain words for the phone to say). A press that has ended already (its /hold_stop came first)
+    # records nothing: {"ok": False, "late": True}.
+    with PHONE_TALK_LOCK:
+        if key in PHONE_TALK["ended"]:
+            return {"ok": False, "late": True}
+    PC_VOICE.hush()
+    if phone_mic:
+        return {"ok": True, "ready": True, "error": ""}
+    with PHONE_TALK_LOCK:  # held while it starts, so a /hold_stop for this press finds its recording
+        if key in PHONE_TALK["ended"]:
+            return {"ok": False, "late": True}
+        before = get_task_status()["status"]
+        publish_task_status(bridge, "Status: Listening to your voice...", running=True)
+        session = MIC_RECORDER.start()
+        if PHONE_TALK["timer"] is not None:
+            PHONE_TALK["timer"].cancel()
+        PHONE_TALK.update(key=key, session=session, listening=True, before=before,
+                          timer=talk_timer(TALK_WARN_SECONDS, warn_long_talk, bridge, key))
+        PHONE_TALK["started"].append((key, session))
+    ready, error = MIC_RECORDER.wait_until_hearing(session, 1.0)
+    return {"ok": not error, "ready": ready, "error": error}
+
+
+def listen_stop_request(key: str):
+    # /listen_stop: the phone's second tap on the face, done talking. Found by its key alone (its /hold_stop, which
+    # waits for the quiet, has usually come already), and only while its recording is the newest.
+    with PHONE_TALK_LOCK:
+        session = next((s for k, s in reversed(PHONE_TALK["started"]) if k == key), 0) if key else 0
+    if session and not MIC_RECORDER.replaced(session):
+        MIC_RECORDER.stop_listening(session)
+
+
+def check_words(bridge, wav_bytes: bytes, listening: bool, before: str) -> dict:
+    # Test my voice on the phone: what the PC's microphone heard, written down and shown, and nothing run. It isn't
+    # a task (TASK_LOCK isn't taken), so a Stop for a task that is running can end the writing down.
+    began, reply = time.monotonic(), ""
+    try:
+        words, way = hear(wav_bytes, ai_key())
+    except (TaskStopped, RuntimeError) as exc:
+        LOG.warning("Test my voice couldn't write down the recording: %s", exc if isinstance(exc, RuntimeError) else "stopped")
+        words, way, reply = "", "", "Try again in a moment."
+    finally:
+        if listening:
+            phone_talk_over(bridge, before)
+    return {"reply": reply, "heard": words, "engine": way, "ms": round((time.monotonic() - began) * 1000)}
+
+
+def hold_stop_request(bridge, sw: int, sh: int, key: str, spoken: str = "", auto: bool = False, drop: bool = False,
+                      check: bool = False, talk: str = "") -> dict:
+    # /hold_stop: the press ended. Each press runs at most one command, and a press with nothing in it never runs
+    # one: running one stops the task that is running (see new_turn). So an empty press, one dropped (drop: the
+    # page was hidden), a muted microphone or one that failed answers in plain words instead. The phone's own words
+    # (spoken) are the command; otherwise it is this press's recording on the PC's microphone (after a tap, auto,
+    # once the talking stops), written down. With check (Test my voice, or a press Android cut short), the words
+    # come back and nothing runs; that press's Send it then sends them back as text, and they run once.
+    # A drop also counts for a press whose stop came already: a tap still waiting for the quiet then runs nothing.
+    with PHONE_TALK_LOCK:
+        again = key in PHONE_TALK["ended"]
+        if not again:
+            PHONE_TALK["ended"].append(key)
+        if drop and key not in PHONE_TALK["dropped"]:
+            PHONE_TALK["dropped"].append(key)
+        # Send it for words that came back unrun: they run now, once. A drop throws them away.
+        send_checked = again and bool(spoken) and not check and not drop and key in PHONE_TALK["checked"]
+        if (send_checked or drop) and key in PHONE_TALK["checked"]:
+            PHONE_TALK["checked"].remove(key)
+        session = next((s for k, s in reversed(PHONE_TALK["started"]) if k == key), 0)
+        current = PHONE_TALK["key"] == key
+        listening, before = current and not again and PHONE_TALK["listening"], PHONE_TALK["before"]
+        if current and not again:
+            if PHONE_TALK["timer"] is not None:
+                PHONE_TALK["timer"].cancel()
+            PHONE_TALK.update(listening=False, timer=None)
+    if talk:
+        LOG.info("Phone talk: %s", talk_stats(talk))
+    if drop and again and session and not MIC_RECORDER.replaced(session):
+        MIC_RECORDER.stop_listening(session)  # a tap's stop waits for the quiet: it ends now, and runs nothing
+    if again:
+        if send_checked:
+            return {"reply": execute_smart_action(spoken, bridge, sw, sh)}
+        return {"reply": ""}  # this press has had its answer
+    if session and (drop or spoken):
+        MIC_RECORDER.stop(session)  # not needed: the press was dropped, or the phone heard the words itself
+    if drop or (spoken and check):
+        if listening:
+            phone_talk_over(bridge, before)
+        return {"reply": "", "heard": spoken, "engine": "phone", "ms": 0} if check and not drop else {"reply": ""}
+    if spoken:
+        return {"reply": execute_smart_action(spoken, bridge, sw, sh)}
+    if not session:
+        if listening:
+            phone_talk_over(bridge, before)
+        return {"reply": PC_MIC_NOTHING}
+    wav_bytes = MIC_RECORDER.stop(session, until_quiet=auto)
+    with PHONE_TALK_LOCK:
+        dropped = key in PHONE_TALK["dropped"]
+    if dropped:  # the page was hidden while the tap waited for the quiet
+        if listening:
+            phone_talk_over(bridge, before)
+        return {"reply": ""}
+    if not wav_bytes and MIC_RECORDER.replaced(session):
+        # A newer press took the microphone (it shows its own state); this one ran nothing, and the page says so.
+        return {"reply": "", "replaced": True}
+    levels = MIC_RECORDER.levels
+    LOG.info("Recorded %.1f s on the PC's microphone, loudest %.0f: %s", len(levels) * 0.05, max(levels, default=0),
+             "talking" if MIC_RECORDER.heard_speech else "nobody talked")
+    if MIC_RECORDER.error or not wav_bytes or MIC_RECORDER.silent or not MIC_RECORDER.heard_speech:
+        if listening:
+            phone_talk_over(bridge, before)
+        return {"reply": MIC_RECORDER.error or (PC_MIC_MUTED if MIC_RECORDER.silent else PC_MIC_NOTHING)}
+    wav_bytes = tidy_recording(wav_bytes, levels)
+    if check:
+        answer = check_words(bridge, wav_bytes, listening, before)
+        if answer["heard"]:
+            with PHONE_TALK_LOCK:
+                PHONE_TALK["checked"].append(key)  # its Send it may run these words, once
+        return answer
+    return {"reply": execute_smart_action("", bridge, sw, sh, wav_bytes=wav_bytes)}
+
+
 def wake_words_heard(bridge, sw: int, sh: int) -> bool:
-    if PC_LISTENING.locked() or time.monotonic() < PC_VOICE.busy_until:
-        return False  # already listening, or that was its own voice
+    if PC_LISTENING.locked() or time.monotonic() < PC_VOICE.busy_until or phone_press_on_pc_mic():
+        return False  # already listening, that was its own voice, or a press on the phone has the microphone
     threading.Thread(target=listen_and_run, args=(bridge, sw, sh), daemon=True).start()
     return True
 
@@ -13171,28 +15337,54 @@ def routine_repeat(kind: str, at: str):
     return {"days": ROUTINE_REPEATS[kind], "at": at}
 
 
-def run_routine(routine: dict, bridge, sw: int, sh: int, scheduled: bool = False) -> str:
-    # Its commands one after another, each as if the user had said it; it ends early when one is stopped
-    # or fails.
+def run_routine(routine: dict, bridge, sw: int, sh: int, scheduled: bool = False, start_at: int = 0,
+                resume=None, yes: bool = False) -> str:
+    # Its commands one after another, each as if the user had said it; it ends early when one is stopped,
+    # fails or waits for a yes. Picked up again (resume: the journal entry of the step it stopped at), it goes
+    # on from that step; yes: that step held its send and the user tapped "Yes, send it", so the send goes first.
     name, steps = routine["name"], routine["steps"]
-    LOG.info("Routine %r: %d steps%s", name, len(steps), " (on its schedule)" if scheduled else "")
+    LOG.info("Routine %r: %d steps%s", name, len(steps), " (on its schedule)" if scheduled
+             else f" (picked up at step {start_at + 1})" if resume is not None else "")
     bridge.say_sig.emit(f"▶ {name}", 3000)
-    done, last = 0, ""
+    done, last = start_at, ""
     ROUTINE_RUN.active = True
     try:
-        for step in steps:
-            last = execute_smart_action(step, bridge, sw, sh)
-            if str(last).startswith(routines.STOPPED):
+        for at in range(start_at, len(steps)):
+            # Where the routine is, for the journal entry of a step that stops halfway.
+            ROUTINE_RUN.where = {"id": routine.get("id", ""), "name": name, "steps": steps, "at": at}
+            picked_up = resume is not None and at == start_at
+            if picked_up and yes:
+                last = execute_smart_action("yes", bridge, sw, sh, picking_up=True)
+            else:
+                last = execute_smart_action(steps[at], bridge, sw, sh, resume=resume if picked_up else None)
+            if picked_up and getattr(TASK_ENDED, "state", "") == "not_started":
+                return last  # another command started first: the routine waits where it was
+            if str(last).startswith(routines.STOPPED) or getattr(TASK_ENDED, "state", "") in ("paused", "stuck"):
                 break
             done += 1
     finally:
-        ROUTINE_RUN.active = False
+        ROUTINE_RUN.active, ROUTINE_RUN.where = False, None
     reply = f"{name}: all done." if done == len(steps) else f"{name} stopped after {done} of {len(steps)}: {last}"
     add_to_history(f"▶ {name}", reply)
     if scheduled:
         telegram_alert(f"▶ Your routine {reply}")
         chat_alert(f"▶ Your routine {reply}")
     return reply
+
+
+def resume_routine(entry: dict, bridge, sw: int, sh: int, yes: bool = False) -> str:
+    # A routine that stopped at one of its steps: that step is picked up, then the rest run, as long as the
+    # routine is still the same. Changed or deleted since, it is left to the user, and the entry dropped; but a
+    # send the step held, which the user just said yes to (yes), still goes.
+    where = entry["routine"]
+    routine = ROUTINES.find(where["id"])
+    if routine is None or [str(s)[:300] for s in routine["steps"][:12]] != where["steps"] \
+            or where["at"] >= len(routine["steps"]):
+        if yes:
+            return execute_smart_action("yes", bridge, sw, sh, picking_up=True)
+        journal_call(TASKS.pause, entry["id"], "dropped", "")  # claimed just now, which a forget refuses
+        return short_reply(bridge, "That routine changed since then. Say its name to run it again.")
+    return run_routine(routine, bridge, sw, sh, start_at=where["at"], resume=entry, yes=yes)
 
 
 # Stickers: a QR code or an NFC tag that runs one routine when a phone scans or taps it, with no app. Each has a
@@ -13853,7 +16045,13 @@ class ChatHelper:
     def transcribe(self, audio: bytes, mime_type: str) -> str:
         if not ai_ready():
             raise RuntimeError("Add your AI key in Motorcycle Man on the PC to send voice messages.")
-        return transcribe_speech(audio, ai_key(), mime_type)
+        # Written down beside any running task: a Stop for that task mustn't end the chat's own thread.
+        was = getattr(BESIDE_TASK, "on", False)
+        BESIDE_TASK.on = True
+        try:
+            return transcribe_speech(audio, ai_key(), mime_type)
+        finally:
+            BESIDE_TASK.on = was
 
     def screenshot(self) -> bytes:
         shot = ImageGrab.grab()  # the buddy keeps itself out of it
@@ -13963,7 +16161,8 @@ class ChatService(ChatHelper):
         if guest:
             LOG.info("%s guest %s asks", self.label, guest)
         try:
-            return execute_smart_action(text, self.bridge, self.sw, self.sh)
+            TASK_ENDED.state = ""
+            return with_resume_hint(execute_smart_action(text, self.bridge, self.sw, self.sh))
         finally:
             CHAT_COMMAND.service = GUEST_COMMAND.name = None
 
@@ -14140,7 +16339,8 @@ class TelegramLink(ChatHelper):
         if guest:
             LOG.info("Telegram guest %s asks", guest)
         try:
-            return execute_smart_action(text, self.bridge, self.sw, self.sh)
+            TASK_ENDED.state = ""
+            return with_resume_hint(execute_smart_action(text, self.bridge, self.sw, self.sh))
         finally:
             TELEGRAM_COMMAND.active, GUEST_COMMAND.name = False, None
 
@@ -14198,6 +16398,15 @@ def make_phone_handler(bridge, sw, sh):
             super().end_headers()
 
         def do_GET(self):
+            if self.headers.get("Transfer-Encoding") or any(
+                    value.strip() != "0" for value in self.headers.get_all("Content-Length") or []):
+                # A GET has no body here. Left unread on a kept connection, a body would be taken for the next
+                # question, so this one is refused and its connection closed.
+                self.close_connection = True
+                self.send_response(400)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path in ("/icon.png", "/app-icon.png"):
                 # The logo for the browser tab and, on its night-blue glow, for the home screen. They,
@@ -14245,7 +16454,7 @@ def make_phone_handler(bridge, sw, sh):
                 q = urllib.parse.parse_qs(parsed.query)
                 client, client_port = self.client_address[:2]
                 if parsed.path == "/hello":
-                    answer = hello_info()
+                    answer = hello_info(q.get("nonce", [""])[0], self.connection.getsockname()[0])
                 elif parsed.path == "/pair":
                     answer = pair_phone(bridge, q.get("device", [""])[0], q.get("code", [""])[0], client=client,
                                         same_pc=request_from_this_pc(client, client_port, self.headers),
@@ -14518,34 +16727,36 @@ def make_phone_handler(bridge, sw, sh):
                 q = urllib.parse.parse_qs(parsed.query)
                 self.send_json({"ok": screen_input(q.get("do", [""])[0], q, sw, sh)})
                 return
-            if parsed.path == "/hold_start":
-                publish_task_status(bridge, "Status: Listening to your voice...", running=True)
-                MIC_RECORDER.start()
-                self.send_response(200)
-                self.end_headers()
-                self.wfile.write(b"ok")
-                return
-            if parsed.path == "/listen_stop":
-                MIC_RECORDER.stop_listening()  # the phone's second tap: done talking
-                self.send_response(200)
-                self.end_headers()
-                self.wfile.write(b"ok")
-                return
-            if parsed.path == "/hold_stop":
+            if parsed.path in ("/hold_start", "/listen_stop", "/hold_stop"):
+                # A press on the helmet, paired by the page's talk key (see hold_start_request). A page loaded before
+                # talk keys sends none, and is paired as before (see legacy_talk_key) until it reloads.
                 q = urllib.parse.parse_qs(parsed.query)
-                spoken = q.get("text", [""])[0].strip()
-                # After a tap on the face ("auto"), the PC's microphone listens until the talking stops.
-                wav_bytes = MIC_RECORDER.stop(until_quiet=not spoken and q.get("auto", ["0"])[0] == "1")
-                if wav_bytes and not spoken:
-                    LOG.info("Recorded %.1f s on the PC's microphone, loudest %.0f: %s", len(MIC_RECORDER.levels) * 0.05,
-                             max(MIC_RECORDER.levels, default=0), "talking" if MIC_RECORDER.heard_speech else "nobody talked")
-                    if not MIC_RECORDER.heard_speech:
-                        wav_bytes = b""
-                reply = execute_smart_action(spoken, bridge, sw, sh, wav_bytes=wav_bytes)
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(json.dumps({"reply": reply}).encode("utf-8"))
+                key = talk_key(q) if "s" in q else legacy_talk_key(parsed.path)
+                if not key:
+                    # Every refusal has words a page can show (pages show "reply").
+                    self.send_json({"ok": False, "error": TALK_KEY_PROBLEM, "reply": TALK_KEY_PROBLEM}, 400)
+                    return
+                if parsed.path == "/hold_start":
+                    self.send_json(hold_start_request(bridge, key, q.get("mic", [""])[0] == "phone"))
+                elif parsed.path == "/listen_stop":
+                    listen_stop_request(key)  # the phone's second tap: done talking
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.send_header("Content-Length", "2")
+                    self.end_headers()
+                    self.wfile.write(b"ok")
+                else:
+                    flags = {name: q.get(name, ["0"])[0] == "1" for name in ("auto", "drop", "check")}
+                    self.send_json(hold_stop_request(bridge, sw, sh, key, q.get("text", [""])[0].strip()[:2000],
+                                                     talk=q.get("talk", [""])[0], **flags))
+                return
+            if parsed.path == "/words":  # names for the phone's speech recognizer to expect (see hearing_words)
+                # ownMic: the hidden switch for the app's own recording (Android 13 and newer), off unless
+                # "phone_own_mic" is true in settings.json. The names go only when "phone_hints" is true there too:
+                # they wait for the A/B check of the phone's ears (Android 13 and newer use them).
+                phone_prefs = load_settings()
+                self.send_json({"words": hearing_words() if phone_prefs.get("phone_hints") is True else [],
+                                "ownMic": bool(phone_prefs.get("phone_own_mic", False))})
                 return
             if parsed.path == "/confirm":
                 q = urllib.parse.parse_qs(parsed.query)
@@ -14555,8 +16766,18 @@ def make_phone_handler(bridge, sw, sh):
                 self.end_headers()
                 self.wfile.write(json.dumps({"ok": ok}).encode("utf-8"))
                 return
+            if parsed.path == "/resume":
+                # The phone's Resume task (or Yes, send it): answered like /cmd, once the task has run.
+                task_id = urllib.parse.parse_qs(parsed.query).get("id", [""])[0][:16]
+                self.send_json({"reply": resume_task(bridge, sw, sh, task_id=task_id or None, source="phone")})
+                return
+            if parsed.path == "/forget_task":
+                task_id = urllib.parse.parse_qs(parsed.query).get("id", [""])[0][:16]
+                forget_reply = forget_paused_task(bridge, task_id or None)
+                self.send_json({"ok": forget_reply != FORGET_REFUSED, "reply": forget_reply})
+                return
             if parsed.path == "/stop":
-                body = json.dumps({"stopped": stop_task()}).encode("utf-8")
+                body = json.dumps({"stopped": stop_task("stop")}).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Cache-Control", "no-store")
@@ -14901,6 +17122,19 @@ def fill_tray_menu(menu: QMenu, window, bridge, sw: int, sh: int):
     quiet = menu.addAction("Quiet", lambda: save_setting("quiet", not load_settings().get("quiet", False)))
     quiet.setCheckable(True)
     quiet.setChecked(bool(load_settings().get("quiet", False)))
+    task = resume_offer_for_ui()  # a task that stopped halfway, while nothing runs
+    if task is not None:
+        words = task["request"]
+        if len(words) > 40:  # the menu stays narrow; cut at a word
+            words = words[:40].rsplit(" ", 1)[0].rstrip(" ,.") + "…"
+        step = f" (step {task['step']})" if task.get("step") else ""
+        held = task["ask"] == "Yes, send it"  # a held send: the click sends it (see resume_task)
+        label = f"▶ Yes, send it: “{words}”" if held else f"▶ Resume: “{words}”{step}"
+        menu.addAction(label.replace("&", "&&"), lambda t=task["id"]: threading.Thread(  # && shows one &
+            target=resume_task, args=(bridge, sw, sh), kwargs={"task_id": t, "source": "tray"},
+            daemon=True).start())
+        menu.addAction("Forget the paused task", lambda t=task["id"]: threading.Thread(
+            target=forget_paused_task, args=(bridge, t), kwargs={"buddy": True}, daemon=True).start())
     menu.addAction("Stop what it's doing", stop_task)
     menu.addSeparator()
     menu.addAction("Quit Motorcycle Man", lambda: (setattr(window, "quitting", True), QApplication.instance().quit()))
@@ -14931,6 +17165,11 @@ def main():
     LOG.info("Motorcycle Man started%s", " again after a crash" if "--restarted" in sys.argv
              else f" after updating itself to {this_version()}" if "--updated" in sys.argv else "")
     watch_for_crashes()
+    # A task an update, a crash or a power cut cut off is paused, to be picked up ("keep going", Resume task).
+    for cut_off in journal_call(TASKS.recover_after_restart, sys.argv) or []:
+        LOG.info("The task %r was cut off (%s) at step %d; it can be picked up", cut_off["request"], cut_off["why"],
+                 cut_off["step"])
+    app.aboutToQuit.connect(keep_task_on_quit)
     app.aboutToQuit.connect(closed_properly)
     keep_running_after_a_crash()
     global PHONE_SESSION_TOKEN, TELEGRAM_LINK
@@ -15016,6 +17255,9 @@ def main():
         telegram=telegram,
         chats=CHAT_SERVICES,
         bluetooth=bluetooth,
+        resume_cmd=lambda task_id: threading.Thread(target=resume_task, args=(bridge, sw, sh),
+                                                    kwargs={"task_id": task_id, "source": "typed"},
+                                                    daemon=True).start(),
     )
     ctrl.welcome_tour = True
     bridge.screen_hide_sig.connect(ctrl.step_aside)
@@ -15048,10 +17290,15 @@ def main():
     tip_timer = QTimer(app)
     tip_timer.timeout.connect(lambda: tray.setToolTip(tray_tip()))
     tip_timer.start(30000)
+    resume_timer = QTimer(app)  # a paused task shows up, is picked up or forgotten elsewhere, or gets too old
+    resume_timer.timeout.connect(ctrl.refresh_resume)
+    resume_timer.start(5000)
+    ctrl.refresh_resume()  # a task the recovery above paused
     tray.activated.connect(lambda reason: (ctrl.showNormal(), ctrl.raise_(), ctrl.activateWindow())
                            if reason in (QSystemTrayIcon.ActivationReason.Trigger,
                                          QSystemTrayIcon.ActivationReason.DoubleClick) else None)
     tray.show()
+    QTimer.singleShot(7000, lambda: offer_paused_task(bridge))  # after the "I'm updated!" notice
     another_start = listen_for_another_start(ctrl, bridge)  # noqa: F841 (kept while Motorcycle Man runs)
     app.clipboard().dataChanged.connect(lambda: pc_clipboard_changed(app.clipboard()))
     threading.Thread(target=put_in_send_to, daemon=True).start()

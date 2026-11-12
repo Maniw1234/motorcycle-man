@@ -1,5 +1,6 @@
 import mm_test_env  # noqa: F401 (first: the tests never touch the real settings and keys)
 import os
+import sys
 import tempfile
 import time
 import unittest
@@ -73,6 +74,20 @@ class SearchTests(unittest.TestCase):
 
     def test_sql_words_are_plain(self):
         self.assertEqual(find_files._sql_text("o'brien%_\"x"), "obrien_x")
+
+
+class IndexQueryTests(unittest.TestCase):
+    def test_the_index_looks_in_the_real_folder(self):
+        # Windows Search is never asked: a stand-in records the SQL it would get.
+        connection, rows = mock.Mock(), mock.Mock(EOF=True)
+        client = mock.Mock(CreateObject=lambda name: connection if name == "ADODB.Connection" else rows)
+        with mock.patch.dict(sys.modules, {"comtypes": mock.Mock(client=client), "comtypes.client": client}):
+            found = find_files._from_index(find_files.understand("resume"), r"C:\Users\O'Brien")
+        self.assertEqual(found, [])
+        sql = rows.Open.call_args.args[0]
+        self.assertIn("SCOPE='file:C:/Users/O''Brien'", sql)
+        self.assertIn("System.FileName LIKE '%resume%'", sql)
+        connection.Close.assert_called_once_with()
 
 
 if __name__ == "__main__":
